@@ -1,16 +1,17 @@
 import { useState } from 'react';
-import { ArrowUpRight, Calendar, Plus, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowUpRight, Calendar, Plus, Sparkles, Trash2, Wallet, X } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
-import { GOAL_STATUSES, PRIORITIES, hm, tagStyle } from '../lib.js';
+import { GOAL_STATUSES, PRIORITIES, hm, money, tagStyle } from '../lib.js';
 import { Modal, PriorityIcon, Select, Topbar } from '../components/ui.jsx';
 
 const fmtDate = (iso) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 const progress = (g) => (g.milestones.length ? g.milestones.filter((m) => m.done).length / g.milestones.length : 0);
 
-function GoalCard({ g }) {
+function GoalCard({ g, cur }) {
   const { setOpenGoalId, promoteGoal } = useStore();
   const canPromote = !['achieved', 'archived'].includes(g.status);
+  const fundPct = g.targetCost > 0 ? Math.min(1, (g.potSaved || 0) / g.targetCost) : 0;
   return (
     <div className="goal" onClick={() => setOpenGoalId(g._id)}>
       <div className="row"><PriorityIcon priority={g.priority} /><h3>{g.title}</h3></div>
@@ -18,6 +19,13 @@ function GoalCard({ g }) {
       {g.milestones.length > 0 && (
         <div className="row"><div className="progress"><i style={{ width: `${progress(g) * 100}%` }} /></div>
           <span className="meta">{g.milestones.filter((m) => m.done).length}/{g.milestones.length}</span></div>
+      )}
+      {g.targetCost > 0 && (
+        <div className="row" title={`Linked pot: ${g.linkedPot || 'None'}`}>
+          <Wallet size={11} style={{ color: 'var(--blue)' }} />
+          <div className="progress"><i style={{ width: `${fundPct * 100}%`, background: 'var(--blue)' }} /></div>
+          <span className="meta">{money(g.potSaved || 0, cur)} / {money(g.targetCost, cur)}</span>
+        </div>
       )}
       <div className="row">
         {g.category && <span className="tag" style={tagStyle(g.category)}>{g.category}</span>}
@@ -31,7 +39,8 @@ function GoalCard({ g }) {
 }
 
 export function Goals() {
-  const { goals, createGoal } = useStore();
+  const { user, goals, createGoal } = useStore();
+  const cur = user?.preferences?.currency || 'LKR';
   const [title, setTitle] = useState('');
   const add = async (e) => {
     if (e.key !== 'Enter' || !title.trim()) return;
@@ -50,7 +59,7 @@ export function Goals() {
           return (
             <section className="goal-sec" key={s.id}>
               <h2>{s.label}<span>{list.length}</span></h2>
-              <div className="goal-grid">{list.map((g) => <GoalCard key={g._id} g={g} />)}</div>
+              <div className="goal-grid">{list.map((g) => <GoalCard key={g._id} g={g} cur={cur} />)}</div>
             </section>
           );
         })}
@@ -60,7 +69,8 @@ export function Goals() {
 }
 
 export function GoalModal() {
-  const { goals, openGoalId, setOpenGoalId, updateGoal, deleteGoal, promoteGoal, createTask, createGoal, notify } = useStore();
+  const { user, goals, openGoalId, setOpenGoalId, updateGoal, deleteGoal, promoteGoal, createTask, createGoal, notify } = useStore();
+  const cur = user?.preferences?.currency || 'LKR';
   const g = goals.find((x) => x._id === openGoalId);
   const [title, setTitle] = useState(g?.title || '');
   const [desc, setDesc] = useState(g?.description || '');
@@ -75,6 +85,7 @@ export function GoalModal() {
   const setMilestones = (milestones) => updateGoal(g._id, { milestones });
   const done = g.milestones.filter((m) => m.done).length;
   const blurSave = (key, val) => val !== g[key] && updateGoal(g._id, { [key]: val });
+  const fundPct = g.targetCost > 0 ? Math.min(100, Math.round(((g.potSaved || 0) / g.targetCost) * 100)) : 0;
 
   const aiBreakdown = async () => {
     setBusy('ms');
@@ -86,9 +97,8 @@ export function GoalModal() {
 
   const aiCoach = async () => {
     setBusy('coach');
-    try {
-      setCoach(await api.ai.coachGoal(g._id));
-    } catch (e) { notify(e.message); } finally { setBusy(''); }
+    try { setCoach(await api.ai.coachGoal(g._id)); }
+    catch (e) { notify(e.message); } finally { setBusy(''); }
   };
 
   const promoteFirstTask = async () => {
@@ -139,6 +149,16 @@ export function GoalModal() {
           <textarea className="field" placeholder="Why does this matter? What does done look like?" value={desc}
             onChange={(e) => setDesc(e.target.value)} onBlur={() => blurSave('description', desc)} />
 
+          {g.targetCost > 0 && (
+            <div className="ai-sec" style={{ marginTop: 12 }}>
+              <b>Goal Funding ({g.linkedPot || 'No pot linked'}) — {fundPct}%</b>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
+                <div className="progress"><i style={{ width: `${fundPct}%`, background: 'var(--blue)' }} /></div>
+                <span className="mono meta">{money(g.potSaved || 0, cur)} / {money(g.targetCost, cur)}</span>
+              </div>
+            </div>
+          )}
+
           {coach && (
             <div className="ai-box" style={{ marginTop: 14 }}>
               <h4><Sparkles size={14} /> AI Coach Recommendation: {coach.recommendation.toUpperCase()}</h4>
@@ -184,6 +204,12 @@ export function GoalModal() {
           <div className="label">Target date</div>
           <input className="field" type="date" defaultValue={g.targetDate ? g.targetDate.slice(0, 10) : ''}
             onChange={(e) => updateGoal(g._id, { targetDate: e.target.value || null })} />
+          <div className="label">Target cost ({cur})</div>
+          <input className="field mono" type="number" min="0" step="100" defaultValue={g.targetCost || ''} placeholder="e.g. 150000"
+            onBlur={(e) => blurSave('targetCost', Number(e.target.value) || 0)} />
+          <div className="label">Linked savings pot</div>
+          <input className="field" defaultValue={g.linkedPot || ''} placeholder="e.g. Bike, Emergency fund"
+            onBlur={(e) => blurSave('linkedPot', e.target.value.trim())} />
           <div style={{ height: 14 }} />
           {canPromote && <button className="btn primary block" onClick={async () => { const t = await promoteGoal(g._id); if (t) close(); }}>
             <ArrowUpRight size={15} />Promote to board</button>}

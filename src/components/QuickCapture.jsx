@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Mic, Square, Sparkles } from 'lucide-react';
+import { ImagePlus, Mic, Square, Sparkles } from 'lucide-react';
 import { Modal, Segmented, Select } from './ui.jsx';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
@@ -9,6 +9,8 @@ export default function QuickCapture() {
   const { tasks, goals, createTask, createGoal, setCaptureOpen, setView, setOpenTaskId, notify } = useStore();
   const [mode, setMode] = useState('task');
   const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [subtasks, setSubtasks] = useState([]);
   const [category, setCategory] = useState('');
   const [discipline, setDiscipline] = useState('');
   const [priority, setPriority] = useState('medium');
@@ -19,6 +21,7 @@ export default function QuickCapture() {
   const [busy, setBusy] = useState(false);
   const [rec, setRec] = useState(false);
   const mediaRef = useRef(null);
+  const imgInputRef = useRef(null);
 
   const cats = useMemo(() => [...new Set([...tasks, ...goals].map((x) => x.category).filter(Boolean))], [tasks, goals]);
 
@@ -39,13 +42,41 @@ export default function QuickCapture() {
     } catch (e) { notify(e.message); } finally { setBusy(false); }
   };
 
+  const processScreenshot = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const base64 = String(reader.result || '').split(',')[1];
+      if (!base64) return;
+      setBusy(true);
+      try {
+        const r = await api.ai.imageToTask({ imageBase64: base64, mimeType: file.type || 'image/png', hint: title });
+        setMode('task');
+        if (r.title) setTitle(r.title);
+        if (r.descriptionHtml) setDescription(r.descriptionHtml);
+        if (r.category) setCategory(r.category);
+        if (r.discipline) setDiscipline(r.discipline);
+        if (r.priority) setPriority(r.priority);
+        if (r.estimateMinutes > 0) setEstimateMinutes(String(r.estimateMinutes));
+        if (r.subtasks?.length) setSubtasks(r.subtasks);
+        notify('Extracted task & subtasks from screenshot');
+      } catch (e) { notify(e.message); } finally { setBusy(false); }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const onPaste = (e) => {
+    const item = [...(e.clipboardData?.items || [])].find((x) => x.type.startsWith('image/'));
+    if (item) { e.preventDefault(); processScreenshot(item.getAsFile()); }
+  };
+
   const autoCat = async () => {
     if (!title.trim() || category) return;
     try {
       const r = await api.ai.categorize(title.trim());
       if (r.category) setCategory(r.category);
       if (r.discipline) setDiscipline(r.discipline);
-    } catch { /* silent on blur */ }
+    } catch { /* ignore */ }
   };
 
   const toggleVoice = async () => {
@@ -84,7 +115,7 @@ export default function QuickCapture() {
       mediaRef.current = mr;
       mr.start();
       setRec(true);
-    } catch (e) { notify('Microphone access denied or unavailable'); }
+    } catch { notify('Microphone access denied or unavailable'); }
   };
 
   const createVoiceBatch = async () => {
@@ -108,10 +139,13 @@ export default function QuickCapture() {
     const sib = [...tasks, ...goals].find((x) => x.category === category && x.discipline);
     const data = {
       title: title.trim(),
+      description,
       category: category.trim(),
       priority,
       discipline: discipline.trim() || sib?.discipline || '',
-      ...(mode === 'task' ? { dueDate: dueDate || null, estimateMinutes: Number(estimateMinutes) || 0 } : { targetDate: dueDate || null }),
+      ...(mode === 'task'
+        ? { dueDate: dueDate || null, estimateMinutes: Number(estimateMinutes) || 0, subtasks: subtasks.map((s) => ({ title: s, done: false })) }
+        : { targetDate: dueDate || null, milestones: subtasks.map((s) => ({ title: s, done: false })) }),
     };
     if (mode === 'goal') { await createGoal(data); setView('goals'); setCaptureOpen(false); return; }
     const t = await createTask(data);
@@ -121,22 +155,33 @@ export default function QuickCapture() {
 
   return (
     <Modal small onClose={() => setCaptureOpen(false)}>
-      <form onSubmit={submit} style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <form onSubmit={submit} onPaste={onPaste} style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Segmented value={mode} onChange={setMode} options={[{ id: 'task', label: 'Task' }, { id: 'goal', label: 'Long-term goal' }]} />
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <button type="button" className={`ai-btn ${rec ? 'rec' : ''}`} disabled={busy} onClick={toggleVoice} title="Dictate one or multiple tasks">
+            <input ref={imgInputRef} type="file" accept="image/*" hidden onChange={(e) => processScreenshot(e.target.files?.[0])} />
+            <button type="button" className="ai-btn" disabled={busy} onClick={() => imgInputRef.current?.click()} title="Upload or Ctrl+V a bug/UI screenshot">
+              <ImagePlus size={13} />Screenshot
+            </button>
+            <button type="button" className={`ai-btn ${rec ? 'rec' : ''}`} disabled={busy} onClick={toggleVoice} title="Dictate tasks">
               {rec ? <><Square size={12} />Stop</> : <><Mic size={13} />Voice</>}
             </button>
             <button type="button" className="ai-btn" disabled={busy || !title.trim()} onClick={smartParse} title="Extract date, estimate, priority & category">
-              <Sparkles size={13} />{busy ? 'Thinking…' : 'AI Parse'}
+              <Sparkles size={13} />{busy ? '…' : 'AI Parse'}
             </button>
           </div>
         </div>
 
         <input className="modal-title" autoFocus style={{ marginBottom: 0 }}
-          placeholder={mode === 'task' ? 'e.g. "fix fork seal Friday 2h high, Yamaha"' : 'What do you want to do someday?'}
+          placeholder={mode === 'task' ? 'Type or Ctrl+V a screenshot… e.g. "fix fork seal Friday 2h high, Yamaha"' : 'What do you want to do someday?'}
           value={title} onChange={(e) => setTitle(e.target.value)} onBlur={autoCat} />
+
+        {subtasks.length > 0 && (
+          <div className="ai-box">
+            <h4><Sparkles size={13} /> Extracted {subtasks.length} Sub-tasks &amp; Spec from Screenshot</h4>
+            {subtasks.map((s, i) => <div key={i} className="meta">• {s}</div>)}
+          </div>
+        )}
 
         {estHint && (
           <button type="button" className="ai-chip" onClick={() => setEstimateMinutes(String(estHint.estimateMinutes))}>

@@ -1,6 +1,9 @@
 const { Task, TimeLog, LongTermGoal, Transaction, User } = require('../models');
 const localSettings = require('../localSettings');
 const { handle, AppError, str, oid } = require('./helpers');
+const { createTask } = require('./tasks');
+const { startTimerFor, stopRunning } = require('./timer');
+const { broadcast } = require('../events');
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const pad = (n) => String(n).padStart(2, '0');
@@ -10,7 +13,7 @@ const stripHtml = (s = '') => String(s).replace(/<[^>]+>/g, ' ').replace(/\s+/g,
 function getKeyAndModel() {
   const key = localSettings.getApiKey();
   if (!key) throw new AppError('Add your Gemini API key in Settings → Gemini AI first.', 'NO_API_KEY');
-  const model = localSettings.get().geminiModel || 'gemini-2.5-flash';
+  const model = localSettings.get().geminiModel || 'gemini-3.5-flash-lite';
   return { key, model };
 }
 
@@ -84,7 +87,6 @@ async function getUserCategoryContext(userId) {
   return { tasks, categories, disciplines, pairs };
 }
 
-// Shared helper for client-friendly timesheet summaries (also used by ipc/data.js)
 async function summarizeTimeLogsForUser(userId, logs, taskMap) {
   if (!logs.length) return [];
   const items = logs.slice(0, 60).map((l, idx) => {
@@ -97,6 +99,7 @@ async function summarizeTimeLogsForUser(userId, logs, taskMap) {
       title: t.title || 'Task',
       category: t.category || '',
       discipline: t.discipline || '',
+      sessionNote: l.note || '',
       completedSubtasks: subs,
       hours: hrs,
       date: ymd(new Date(l.startTime)),
@@ -120,19 +123,18 @@ async function summarizeTimeLogsForUser(userId, logs, taskMap) {
     required: ['summaries'],
   };
   const res = await generateJson(
-    `Rewrite each raw time-tracking session into a concise, professional client-friendly timesheet line (e.g., "Refactored auth middleware and verified session handling, 2.5h"). Keep each line under 110 characters.\n\nSessions:\n${JSON.stringify(items)}`,
+    `Rewrite each raw time-tracking session into a concise, professional client-friendly timesheet line (e.g., "Refactored auth middleware and verified session handling, 2.5h"). Prefer using sessionNote and completedSubtasks when present. Keep each line under 110 characters.\n\nSessions:\n${JSON.stringify(items)}`,
     schema
   );
   const byIdx = new Map((res.summaries || []).map((s) => [s.index, s.line]));
   return logs.map((l, i) => {
     const t = taskMap.get(String(l.task)) || {};
     const h = (l.durationSeconds / 3600).toFixed(2);
-    return byIdx.get(i) || `${t.title || 'Focused work'} (${h}h)`;
+    return byIdx.get(i) || `${l.note || t.title || 'Focused work'} (${h}h)`;
   });
 }
 
 function registerAiHandlers() {
-  // Test connection from Settings
   handle('ai:test', async () => {
     const res = await generateJson('Reply with {"status":"ok"}', {
       type: 'OBJECT', properties: { status: { type: 'STRING' } }, required: ['status'],
@@ -140,7 +142,7 @@ function registerAiHandlers() {
     return { ok: res.status === 'ok', model: localSettings.get().geminiModel };
   });
 
-  // 1. Natural-language Quick Capture + 2. Auto-categorize + 4. Smarter Estimate
+  // 1. Natural-language Quick Capture
   handle('ai:parseCapture', async ({ userId, payload }) => {
     const text = str(payload.text, { max: 500, required: true });
     const today = ymd(new Date());
@@ -164,24 +166,21 @@ function registerAiHandlers() {
 Parse this natural-language capture input into a structured task or goal: "${text}"
 Rules:
 - Clean the title so metadata (like "Friday", "2h", "high", category name) is removed from the title.
-- MUST reuse an existing category from this list if it matches or is close: ${JSON.stringify(categories)}. Only use one of those existing categories unless none fit at all.
+- MUST reuse an existing category from this list if it matches or is close: ${JSON.stringify(categories)}.
 - Existing category-to-discipline mappings: ${JSON.stringify(pairs)}. Existing disciplines: ${JSON.stringify(disciplines)}.
 - Convert relative dates ("Friday", "tomorrow", "next week") into YYYY-MM-DD based on ${today} (${weekday}). Use null if no date is mentioned.
-- Convert duration ("2h", "45m", "1.5 hours") into integer minutes, or 0 if not mentioned.`,
+- Convert duration ("2h", "45m") into integer minutes, or 0 if not mentioned.`,
       schema
     );
   });
 
-  // 2. Auto-categorize & Discipline suggestion
+  // 2. Auto-categorize
   handle('ai:categorize', async ({ userId, payload }) => {
     const title = str(payload.title, { max: 300, required: true });
     const { categories, disciplines, pairs } = await getUserCategoryContext(userId);
     const schema = {
       type: 'OBJECT',
-      properties: {
-        category: { type: 'STRING' },
-        discipline: { type: 'STRING' },
-      },
+      properties: { category: { type: 'STRING' }, discipline: { type: 'STRING' } },
       required: ['category', 'discipline'],
     };
     return generateJson(
@@ -193,7 +192,7 @@ Past mappings: ${JSON.stringify(pairs)}`,
     );
   });
 
-  // 3. Task or Goal Breakdown (sub-tasks / milestones)
+  // 3. Breakdown
   handle('ai:breakdown', async ({ payload }) => {
     const title = str(payload.title, { max: 300, required: true });
     const desc = stripHtml(payload.description || '');
@@ -201,9 +200,7 @@ Past mappings: ${JSON.stringify(pairs)}`,
     const existing = Array.isArray(payload.existing) ? payload.existing : [];
     const schema = {
       type: 'OBJECT',
-      properties: {
-        items: { type: 'ARRAY', items: { type: 'STRING' } },
-      },
+      properties: { items: { type: 'ARRAY', items: { type: 'STRING' } } },
       required: ['items'],
     };
     return generateJson(
@@ -215,7 +212,7 @@ Already existing items (do not duplicate): ${JSON.stringify(existing)}`,
     );
   });
 
-  // 4. Smarter Estimates based on user's tracked history
+  // 4. Smarter Estimates
   handle('ai:estimate', async ({ userId, payload }) => {
     const title = str(payload.title, { max: 300, required: true });
     const category = str(payload.category || '', { max: 60 });
@@ -226,9 +223,7 @@ Already existing items (do not duplicate): ${JSON.stringify(existing)}`,
       return { estimateMinutes: 60, message: 'No tracked task history yet — defaulting to 1h estimate.', matchedCount: 0 };
     }
     const compact = history.map((h) => ({
-      key: h.key,
-      title: h.title,
-      category: h.category,
+      key: h.key, title: h.title, category: h.category,
       actualMinutes: Math.max(1, Math.round(h.totalTrackedSeconds / 60)),
     }));
     const schema = {
@@ -243,13 +238,13 @@ Already existing items (do not duplicate): ${JSON.stringify(existing)}`,
     return generateJson(
       `Compare the new task "${title}" (Category: "${category}") against the user's actual tracked task history below.
 Find the most similar past tasks, calculate their average actual duration, and suggest an estimate in minutes (rounded to nearest 5).
-Format the message like: "Similar tasks took you about 1h 40m on average (matched 3 tasks: WRK-104, WRK-112)."
+Format the message like: "Similar tasks took you about 1h 40m on average (matched 3 tasks)."
 User History:\n${JSON.stringify(compact)}`,
       schema
     );
   });
 
-  // 5. Voice Capture (Multimodal Audio -> Multiple Task Cards)
+  // 5. Voice Capture
   handle('ai:voiceCapture', async ({ userId, payload }) => {
     const audioBase64 = str(payload.audioBase64, { max: 15 * 1024 * 1024, required: true });
     const mimeType = str(payload.mimeType || 'audio/webm', { max: 100 });
@@ -306,13 +301,8 @@ Resolve relative dates to YYYY-MM-DD or null.`,
     const candidates = open.filter((t) =>
       t.status === 'in_progress' || t.status === 'up_next' || (t.dueDate && t.dueDate <= today)
     ).slice(0, 30).map((t) => ({
-      id: String(t._id),
-      key: t.key,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
-      category: t.category,
-      dueDate: t.dueDate,
+      id: String(t._id), key: t.key, title: t.title, status: t.status,
+      priority: t.priority, category: t.category, dueDate: t.dueDate,
       remainingMinutes: Math.max(15, (t.estimateMinutes || 45) - Math.round((t.totalTrackedSeconds || 0) / 60)),
     }));
     const schema = {
@@ -326,9 +316,7 @@ Resolve relative dates to YYYY-MM-DD or null.`,
           items: {
             type: 'OBJECT',
             properties: {
-              id: { type: 'STRING' },
-              key: { type: 'STRING' },
-              title: { type: 'STRING' },
+              id: { type: 'STRING' }, key: { type: 'STRING' }, title: { type: 'STRING' },
               suggestedMinutes: { type: 'INTEGER' },
               action: { type: 'STRING', enum: ['do_today', 'defer'] },
               reason: { type: 'STRING' },
@@ -368,7 +356,7 @@ Keep each section 1-2 sentences, concrete, referencing actual task titles/catego
     );
   });
 
-  // 8. Goal Coaching (Someday & Stale Goals)
+  // 8. Goal Coaching
   handle('ai:coachGoal', async ({ userId, payload }) => {
     const g = await LongTermGoal.findOne({ _id: oid(payload.goalId), user: userId }).lean();
     if (!g) throw new AppError('Goal not found', 'NOT_FOUND');
@@ -398,7 +386,7 @@ Title: "${g.title}"
 Description: "${stripHtml(g.description)}"
 Category: "${g.category || 'Uncategorised'}"
 Status: "${g.status}", Age: ${ageDays} days, Promoted tasks so far: ${(g.promotedTasks || []).length}, Milestones: ${JSON.stringify(g.milestones || [])}
-1. Decide whether they should "promote" (start now with a small concrete task), "split" (break into 2-3 smaller goals), or "drop" (archive it).
+1. Decide whether they should "promote", "split", or "drop".
 2. Provide the exact first concrete task they can promote to the board right now (under 2 hours estimate).`,
       schema
     );
@@ -473,23 +461,21 @@ Resolve relative dates ("yesterday", "last Friday") to YYYY-MM-DD.`,
     };
     return generateJson(
       `Analyze the user's monthly finance data and yearly overview (Currency: ${payload.currency || 'LKR'}, Today: ${ymd(new Date())}).
-Call out:
-1. Unusual spending or category spikes compared to other months.
-2. Savings rate commentary.
-3. Potential recurring charges detected from notes/categories that aren't marked recurring yet.
-4. Projected end-of-month balance based on current daily burn rate.
+Call out unusual spending, savings rate health, potential unflagged recurring charges, and projected end-of-month balance.
 Month Data: ${JSON.stringify(payload.monthData)}
 Year Overview: ${JSON.stringify(payload.yearData)}`,
       schema
     );
   });
 
-  // 12. Ask Your Data (Read-only Mongoose tools via Gemini Function Calling)
-  handle('ai:askData', async ({ userId, payload }) => {
-    const question = str(payload.question, { max: 500, required: true });
+  // 12 & Pack 3. Ask Your Data + Agentic Action Mode (Read + Write Tools)
+  async function runPaletteAi(userId, question, allowWrite = false) {
     const today = ymd(new Date());
     const user = await User.findById(userId).select('preferences.currency').lean();
     const cur = user?.preferences?.currency || 'LKR';
+    const { categories, disciplines } = await getUserCategoryContext(userId);
+    const actionsTaken = [];
+    let mutated = false;
 
     const declarations = [
       {
@@ -534,6 +520,72 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
       },
     ];
 
+    if (allowWrite) {
+      declarations.push(
+        {
+          name: 'createNewTask',
+          description: 'Create a new task on the Kanban board with optional subtasks, dueDate (YYYY-MM-DD), priority, category, and estimateMinutes.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              title: { type: 'STRING' },
+              category: { type: 'STRING' },
+              discipline: { type: 'STRING' },
+              priority: { type: 'STRING' },
+              status: { type: 'STRING' },
+              dueDate: { type: 'STRING' },
+              estimateMinutes: { type: 'INTEGER' },
+              subtasks: { type: 'ARRAY', items: { type: 'STRING' } },
+            },
+            required: ['title'],
+          },
+        },
+        {
+          name: 'bulkUpdateTasks',
+          description: 'Move or update tasks matching a filter (e.g. overdue tasks, or tasks in a status/category) to a new status, dueDate, or priority.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              onlyOverdue: { type: 'BOOLEAN' },
+              filterStatus: { type: 'STRING' },
+              filterCategory: { type: 'STRING' },
+              setDueDate: { type: 'STRING' },
+              setStatus: { type: 'STRING' },
+              setPriority: { type: 'STRING' },
+            },
+          },
+        },
+        {
+          name: 'controlTimer',
+          description: 'Start the focus timer on a task matching taskKeyOrTitle (or "highest_priority_today"), or stop the running timer.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              action: { type: 'STRING', enum: ['start', 'stop'] },
+              taskQuery: { type: 'STRING' },
+            },
+            required: ['action'],
+          },
+        },
+        {
+          name: 'recordTransaction',
+          description: 'Record an income, expense, or saving transaction in Finance.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              type: { type: 'STRING', enum: ['income', 'expense', 'saving'] },
+              amount: { type: 'NUMBER' },
+              date: { type: 'STRING' },
+              category: { type: 'STRING' },
+              pot: { type: 'STRING' },
+              note: { type: 'STRING' },
+            },
+            required: ['type', 'amount', 'date', 'category'],
+          },
+        }
+      );
+    }
+
     async function runTool(name, args = {}) {
       if (name === 'queryTimeTracked') {
         const logFilter = { user: userId };
@@ -570,10 +622,7 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
         if (args.priority) q.priority = args.priority;
         if (args.category) q.category = new RegExp(args.category, 'i');
         const list = await Task.find(q).limit(40).select('key title status priority category dueDate totalTrackedSeconds').lean();
-        return {
-          count: list.length,
-          tasks: list.map((t) => ({ ...t, hours: Math.round((t.totalTrackedSeconds / 3600) * 10) / 10 })),
-        };
+        return { count: list.length, tasks: list.map((t) => ({ ...t, hours: Math.round((t.totalTrackedSeconds / 3600) * 10) / 10 })) };
       }
       if (name === 'queryFinance') {
         const q = { user: userId };
@@ -595,18 +644,91 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
         }
         return { currency: cur, count: txs.length, totals: sum, byCategory: byCat, sample: txs.slice(0, 15) };
       }
+      if (name === 'createNewTask') {
+        const doc = await createTask(userId, {
+          title: args.title,
+          category: args.category || '',
+          discipline: args.discipline || '',
+          priority: ['high', 'medium', 'low'].includes(args.priority) ? args.priority : 'medium',
+          status: ['backlog', 'up_next', 'in_progress', 'blocked'].includes(args.status) ? args.status : 'up_next',
+          dueDate: args.dueDate || null,
+          estimateMinutes: Number(args.estimateMinutes) || 0,
+          subtasks: Array.isArray(args.subtasks) ? args.subtasks.map((s) => ({ title: String(s), done: false })) : [],
+        });
+        mutated = true;
+        actionsTaken.push(`Created task ${doc.key}: ${doc.title}`);
+        return { created: doc.key, title: doc.title };
+      }
+      if (name === 'bulkUpdateTasks') {
+        const q = { user: userId, status: { $ne: 'completed' } };
+        if (args.onlyOverdue) q.dueDate = { $ne: null, $lt: today };
+        if (args.filterStatus) q.status = args.filterStatus;
+        if (args.filterCategory) q.category = new RegExp(args.filterCategory, 'i');
+        const set = {};
+        if (args.setDueDate) set.dueDate = args.setDueDate;
+        if (args.setStatus) set.status = args.setStatus;
+        if (args.setPriority) set.priority = args.setPriority;
+        const r = await Task.updateMany(q, { $set: set });
+        mutated = true;
+        actionsTaken.push(`Updated ${r.modifiedCount} task(s)`);
+        return { modifiedCount: r.modifiedCount };
+      }
+      if (name === 'controlTimer') {
+        if (args.action === 'stop') {
+          await stopRunning(userId);
+          broadcast('timer:changed');
+          mutated = true;
+          actionsTaken.push('Stopped timer');
+          return { stopped: true };
+        }
+        let target = null;
+        if (!args.taskQuery || args.taskQuery === 'highest_priority_today') {
+          const open = await Task.find({ user: userId, status: { $ne: 'completed' } }).lean();
+          const rank = { high: 0, medium: 1, low: 2 };
+          open.sort((a, b) => (a.dueDate === today ? -1 : 1) - (b.dueDate === today ? -1 : 1) || (rank[a.priority] ?? 1) - (rank[b.priority] ?? 1));
+          target = open[0];
+        } else {
+          const rx = new RegExp(args.taskQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+          target = await Task.findOne({ user: userId, status: { $ne: 'completed' }, $or: [{ key: rx }, { title: rx }, { category: rx }] }).lean();
+        }
+        if (!target) return { error: 'No matching task found to start timer' };
+        await startTimerFor(userId, target._id);
+        broadcast('timer:changed');
+        mutated = true;
+        actionsTaken.push(`Started timer on ${target.key} (${target.title})`);
+        return { started: target.key, title: target.title };
+      }
+      if (name === 'recordTransaction') {
+        const d = /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : today;
+        const tx = await Transaction.create({
+          user: userId,
+          type: ['income', 'expense', 'saving'].includes(args.type) ? args.type : 'expense',
+          amount: Math.max(0.01, Number(args.amount) || 0),
+          date: d,
+          month: d.slice(0, 7),
+          category: String(args.category || 'Other').slice(0, 60),
+          pot: String(args.pot || '').slice(0, 60),
+          note: String(args.note || '').slice(0, 200),
+          recurring: false,
+        });
+        mutated = true;
+        actionsTaken.push(`Logged ${tx.type}: ${cur} ${tx.amount} (${tx.category})`);
+        return { id: String(tx._id), amount: tx.amount, category: tx.category };
+      }
       return { error: 'Unknown tool' };
     }
 
     const contents = [{ role: 'user', parts: [{ text: question }] }];
-    const sys = `You are Workbench AI. Today is ${today} (Current month: ${today.slice(0, 7)}, Currency: ${cur}). Use the provided read-only tools to answer the user's question accurately in 1-3 concise sentences.`;
+    const sys = `You are Workbench AI. Today is ${today} (Current month: ${today.slice(0, 7)}, Currency: ${cur}).
+Existing task categories: ${JSON.stringify(categories)}. Existing disciplines: ${JSON.stringify(disciplines)}.
+Use the provided tools to answer questions or execute actions requested by the user, then confirm concisely in 1-2 sentences.`;
 
-    for (let turn = 0; turn < 3; turn++) {
+    for (let turn = 0; turn < 4; turn++) {
       const data = await callGemini({ contents, systemInstruction: sys, tools: [{ functionDeclarations: declarations }] });
       const parts = data?.candidates?.[0]?.content?.parts || [];
       const calls = parts.filter((p) => p.functionCall);
       if (!calls.length) {
-        return { answer: parts.map((p) => p.text || '').join('').trim() || 'No data found.' };
+        return { answer: parts.map((p) => p.text || '').join('').trim() || 'Done.', actionsTaken, mutated };
       }
       contents.push({ role: 'model', parts });
       const responseParts = [];
@@ -616,10 +738,13 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
       }
       contents.push({ role: 'user', parts: responseParts });
     }
-    return { answer: 'Reached tool limit.' };
-  });
+    return { answer: 'Completed requested actions.', actionsTaken, mutated };
+  }
 
-  // 13. Semantic Search over task descriptions, subtasks, and notes
+  handle('ai:askData', async ({ userId, payload }) => runPaletteAi(userId, str(payload.question, { max: 500, required: true }), false));
+  handle('ai:agentCommand', async ({ userId, payload }) => runPaletteAi(userId, str(payload.command, { max: 500, required: true }), true));
+
+  // 13. Semantic Search
   handle('ai:semanticSearch', async ({ userId, payload }) => {
     const query = str(payload.query, { max: 300, required: true });
     const tasks = await Task.find({ user: userId })
@@ -627,17 +752,13 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
       .lean();
     if (!tasks.length) return [];
 
-    // Compute and cache embeddings for any task whose text changed
     const stale = [];
     for (const t of tasks) {
       const text = `${t.key} ${t.title} ${t.category || ''} ${t.discipline || ''} ${stripHtml(t.description)} ${(t.subtasks || []).map((s) => s.title).join(' ')} ${t.blockedReason || ''}`.trim();
       t._text = text;
-      if (!Array.isArray(t.embedding) || !t.embedding.length || t.embeddingText !== text) {
-        stale.push(t);
-      }
+      if (!Array.isArray(t.embedding) || !t.embedding.length || t.embeddingText !== text) stale.push(t);
     }
     if (stale.length) {
-      // Embed up to 40 stale tasks per batch + the user query in one round-trip
       const batch = stale.slice(0, 40);
       const vecs = await embedTexts([query, ...batch.map((x) => x._text)]);
       const qVec = vecs[0] || [];
@@ -662,24 +783,173 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
       .slice(0, 12);
   });
 
-  // 14. Time-log summaries preview
+  // 14. Time-log summaries
   handle('ai:summarizeTimesheet', async ({ userId, payload }) => {
     const from = str(payload.from, { max: 20, required: true });
     const to = str(payload.to, { max: 20, required: true });
+    const catFilter = str(payload.category || '', { max: 60 }).toLowerCase();
     const start = new Date(`${from}T00:00:00`);
     const end = new Date(`${to}T00:00:00`); end.setDate(end.getDate() + 1);
-    const logs = await TimeLog.find({ user: userId, isRunning: false, startTime: { $gte: start, $lt: end } }).sort('startTime').lean();
-    if (!logs.length) throw new AppError('No tracked sessions in that date range');
-    const tasks = await Task.find({ _id: { $in: [...new Set(logs.map((l) => String(l.task)))] } })
+    const allLogs = await TimeLog.find({ user: userId, isRunning: false, startTime: { $gte: start, $lt: end } }).sort('startTime').lean();
+    if (!allLogs.length) throw new AppError('No tracked sessions in that date range');
+    const tasks = await Task.find({ _id: { $in: [...new Set(allLogs.map((l) => String(l.task)))] } })
       .select('key title category discipline subtasks').lean();
     const tm = new Map(tasks.map((t) => [String(t._id), t]));
+    const logs = catFilter
+      ? allLogs.filter((l) => (tm.get(String(l.task))?.category || '').toLowerCase() === catFilter)
+      : allLogs;
+    if (!logs.length) throw new AppError('No sessions match that category in this date range');
     const lines = await summarizeTimeLogsForUser(userId, logs, tm);
-    return logs.map((l, i) => ({
-      date: ymd(new Date(l.startTime)),
-      hours: Math.round((l.durationSeconds / 3600) * 100) / 100,
-      key: tm.get(String(l.task))?.key || '',
-      line: lines[i],
+    return logs.map((l, i) => {
+      const t = tm.get(String(l.task)) || {};
+      return {
+        date: ymd(new Date(l.startTime)),
+        hours: Math.round((l.durationSeconds / 3600) * 100) / 100,
+        key: t.key || '',
+        title: t.title || '',
+        category: t.category || 'Uncategorised',
+        line: lines[i],
+      };
+    });
+  });
+
+  // Pack 1A. Receipt & Bank Slip Scanner (Vision -> Finance Transaction)
+  handle('ai:scanReceipt', async ({ userId, payload }) => {
+    const imageBase64 = str(payload.imageBase64, { max: 15 * 1024 * 1024, required: true });
+    const mimeType = str(payload.mimeType || 'image/png', { max: 100 });
+    const today = ymd(new Date());
+    const recent = await Transaction.find({ user: userId }).sort('-date').limit(60).select('category pot').lean();
+    const cats = [...new Set(['Salary', 'Freelance', 'Business', 'Rent', 'Food', 'Transport', 'Fuel', 'Bills', 'Health', 'Shopping', 'Entertainment', 'Savings', ...recent.map((r) => r.category).filter(Boolean)])];
+    const pots = [...new Set(['Emergency fund', 'General', ...recent.map((r) => r.pot).filter(Boolean)])];
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        type: { type: 'STRING', enum: ['income', 'expense', 'saving'] },
+        amount: { type: 'NUMBER' },
+        date: { type: 'STRING' },
+        category: { type: 'STRING' },
+        pot: { type: 'STRING' },
+        note: { type: 'STRING' },
+        recurring: { type: 'BOOLEAN' },
+      },
+      required: ['type', 'amount', 'date', 'category', 'pot', 'note', 'recurring'],
+    };
+    const data = await callGemini({
+      contents: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType, data: imageBase64 } },
+          {
+            text: `Extract the transaction details from this receipt, invoice, or bank transfer slip image.
+Today's date fallback (if no date is visible): ${today}.
+Prefer matching one of these categories: ${JSON.stringify(cats)}.
+Savings pots (only if saving): ${JSON.stringify(pots)}.
+Include merchant/recipient and key items in the note.`,
+          },
+        ],
+      }],
+      responseSchema: schema,
+    });
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '{}';
+    try { return JSON.parse(text); } catch { throw new AppError('Could not read receipt image', 'AI_ERROR'); }
+  });
+
+  // Pack 1B. Screenshot-to-Task (Vision -> Task + Description + Subtasks)
+  handle('ai:imageToTask', async ({ userId, payload }) => {
+    const imageBase64 = str(payload.imageBase64, { max: 15 * 1024 * 1024, required: true });
+    const mimeType = str(payload.mimeType || 'image/png', { max: 100 });
+    const hint = str(payload.hint || '', { max: 300 });
+    const { categories, disciplines, pairs } = await getUserCategoryContext(userId);
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING' },
+        descriptionHtml: { type: 'STRING' },
+        category: { type: 'STRING' },
+        discipline: { type: 'STRING' },
+        priority: { type: 'STRING', enum: ['high', 'medium', 'low'] },
+        estimateMinutes: { type: 'INTEGER' },
+        subtasks: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+      required: ['title', 'descriptionHtml', 'category', 'discipline', 'priority', 'estimateMinutes', 'subtasks'],
+    };
+    const data = await callGemini({
+      contents: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType, data: imageBase64 } },
+          {
+            text: `Analyze this screenshot (bug, error log, UI design, or diagram) and turn it into an actionable engineering/project task.
+User hint: "${hint}"
+Reuse existing categories when possible: ${JSON.stringify(categories)}.
+Category-discipline pairs: ${JSON.stringify(pairs)} (Disciplines: ${JSON.stringify(disciplines)}).
+Format descriptionHtml with clean <p>, <b>, <code>, and <ul><li> tags summarizing the problem/context, and provide 3-5 concrete subtasks.`,
+          },
+        ],
+      }],
+      responseSchema: schema,
+    });
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '{}';
+    try { return JSON.parse(text); } catch { throw new AppError('Could not parse screenshot into task', 'AI_ERROR'); }
+  });
+
+  // Pack 2A. 1-Click Daily Standup Generator
+  handle('ai:standup', async ({ userId }) => {
+    const now = new Date();
+    const today = ymd(now);
+    const since = new Date(now.getTime() - 36 * 3600 * 1000); // last 36h covers yesterday + today
+    const [recentCompleted, recentLogs, openTasks] = await Promise.all([
+      Task.find({ user: userId, status: 'completed', completedAt: { $gte: since } }).select('key title category').lean(),
+      TimeLog.find({ user: userId, startTime: { $gte: since } }).select('task durationSeconds note startTime').lean(),
+      Task.find({ user: userId, status: { $ne: 'completed' } }).select('key title status category priority dueDate blockedReason').lean(),
+    ]);
+    const taskIds = [...new Set(recentLogs.map((l) => String(l.task)))];
+    const logTasks = await Task.find({ _id: { $in: taskIds } }).select('key title category').lean();
+    const tm = new Map(logTasks.map((t) => [String(t._id), t]));
+    const sessions = recentLogs.map((l) => ({
+      task: `${tm.get(String(l.task))?.key || ''} ${tm.get(String(l.task))?.title || ''}`.trim(),
+      minutes: Math.round((l.durationSeconds || 0) / 60),
+      note: l.note || '',
     }));
+    const todayPlan = openTasks.filter((t) => t.status === 'in_progress' || t.dueDate === today || (t.dueDate && t.dueDate < today));
+    const blocked = openTasks.filter((t) => t.status === 'blocked');
+
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        yesterday: { type: 'ARRAY', items: { type: 'STRING' } },
+        today: { type: 'ARRAY', items: { type: 'STRING' } },
+        blockers: { type: 'ARRAY', items: { type: 'STRING' } },
+        markdown: { type: 'STRING' },
+      },
+      required: ['yesterday', 'today', 'blockers', 'markdown'],
+    };
+    return generateJson(
+      `Generate a crisp, developer-friendly Daily Standup update from the user's real Workbench activity:
+Completed recently: ${JSON.stringify(recentCompleted)}
+Recent tracked sessions & notes: ${JSON.stringify(sessions)}
+In progress / Due today: ${JSON.stringify(todayPlan)}
+Blocked tasks: ${JSON.stringify(blocked)}
+Include task keys (e.g. WRK-105) where helpful, and provide a ready-to-paste Slack/Teams markdown string in "markdown".`,
+      schema
+    );
+  });
+
+  // Pack 2B. AI Technical Writer in RichEditor
+  handle('ai:writeSpec', async ({ payload }) => {
+    const title = str(payload.title, { max: 300, required: true });
+    const notes = stripHtml(payload.html || '');
+    const schema = {
+      type: 'OBJECT',
+      properties: { html: { type: 'STRING' } },
+      required: ['html'],
+    };
+    return generateJson(
+      `Turn the task title and rough notes below into a clean, structured technical specification or execution guide formatted in simple HTML using only <p>, <b>, <i>, <code>, <ul>, and <li> tags.
+Task Title: "${title}"
+Rough Notes: "${notes}"`,
+      schema
+    );
   });
 }
 

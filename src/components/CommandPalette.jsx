@@ -5,20 +5,21 @@ import { useStore } from '../store.jsx';
 import { Modal } from './ui.jsx';
 
 export default function CommandPalette() {
-  const { tasks, goals, active, lastTaskId, setView, setPaletteOpen, setCaptureOpen, setOpenTaskId, setOpenGoalId, startTimer, stopTimer, notify } = useStore();
+  const { tasks, goals, active, lastTaskId, setView, setPaletteOpen, setCaptureOpen, setOpenTaskId, setOpenGoalId, startTimer, stopTimer, loadAll, notify } = useStore();
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(0);
-  const [aiAnswer, setAiAnswer] = useState('');
+  const [aiResult, setAiResult] = useState(null);
   const [semMatches, setSemMatches] = useState([]);
   const [busy, setBusy] = useState(false);
   const listRef = useRef(null);
   const close = () => setPaletteOpen(false);
 
-  const askAi = async (question) => {
-    setBusy(true); setAiAnswer('');
+  const runAgent = async (command, allowWrite) => {
+    setBusy(true); setAiResult(null);
     try {
-      const r = await api.ai.askData(question);
-      setAiAnswer(r.answer);
+      const r = allowWrite ? await api.ai.agentCommand(command) : await api.ai.askData(command);
+      setAiResult(r);
+      if (r.mutated) await loadAll();
     } catch (e) { notify(e.message); } finally { setBusy(false); }
   };
 
@@ -51,8 +52,9 @@ export default function CommandPalette() {
     const cmdItems = n ? cmds.filter((c) => match(c.label)).map((c) => ({ ...c, run: () => { close(); c.run(); } })) : cmds.map((c) => ({ ...c, run: () => { close(); c.run(); } }));
 
     const aiItems = n.length >= 2 ? [
-      { label: `✨ Ask AI: "${q.trim()}"`, hint: 'Ask Your Data', keepOpen: true, run: () => askAi(q.trim()) },
-      { label: `🔍 Semantic search: "${q.trim()}"`, hint: 'By Meaning', keepOpen: true, run: () => runSemantic(q.trim()) },
+      { label: `⚡ Run Agent Action: "${q.trim()}"`, hint: 'Create / Move / Log / Timer', run: () => runAgent(q.trim(), true) },
+      { label: `✨ Ask Your Data: "${q.trim()}"`, hint: 'Read-only Q&A', run: () => runAgent(q.trim(), false) },
+      { label: `🔍 Semantic search: "${q.trim()}"`, hint: 'By Meaning', run: () => runSemantic(q.trim()) },
     ] : [];
 
     const semItems = semMatches.map((m) => ({
@@ -64,7 +66,7 @@ export default function CommandPalette() {
     return n ? [...aiItems, ...semItems, ...taskItems, ...goalItems, ...cmdItems] : [...cmdItems, ...taskItems.slice(0, 4)];
   }, [q, tasks, goals, active, lastTaskId, semMatches]); // eslint-disable-line
 
-  useEffect(() => { setSel(0); setSemMatches([]); setAiAnswer(''); }, [q]);
+  useEffect(() => { setSel(0); setSemMatches([]); setAiResult(null); }, [q]);
   useEffect(() => { listRef.current?.children[sel]?.scrollIntoView({ block: 'nearest' }); }, [sel]);
 
   const exec = (it) => { if (!it) return; it.run(); };
@@ -76,12 +78,17 @@ export default function CommandPalette() {
 
   return (
     <Modal small onClose={close}>
-      <input className="pal-input" autoFocus placeholder='Search tasks, or ask AI ("How many hours on Axceera this month?")…' value={q}
+      <input className="pal-input" autoFocus placeholder='Type a command, question, or agent action ("Move overdue to today and start timer")…' value={q}
         onChange={(e) => setQ(e.target.value)} onKeyDown={onKey} />
-      {(busy || aiAnswer) && (
+      {(busy || aiResult) && (
         <div className="ai-box" style={{ margin: 10 }}>
-          <h4><Sparkles size={13} /> {busy ? 'Querying your data…' : 'Workbench AI Answer'}</h4>
-          {aiAnswer && <div style={{ fontSize: 13, lineHeight: 1.5 }}>{aiAnswer}</div>}
+          <h4><Sparkles size={13} /> {busy ? 'Running Workbench Agent…' : 'Workbench AI'}</h4>
+          {aiResult?.actionsTaken?.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {aiResult.actionsTaken.map((a, i) => <span key={i} className="ai-chip">{a}</span>)}
+            </div>
+          )}
+          {aiResult?.answer && <div style={{ fontSize: 13, lineHeight: 1.5 }}>{aiResult.answer}</div>}
         </div>
       )}
       <div className="pal-list" ref={listRef}>

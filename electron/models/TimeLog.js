@@ -9,12 +9,12 @@ const TimeLogSchema = new Schema(
     durationSeconds: { type: Number, default: 0, min: 0 },
     isRunning: { type: Boolean, default: true },
     manual: { type: Boolean, default: false },   // added/edited by hand
+    note: { type: String, default: '', trim: true, maxlength: 300 },
   },
   { timestamps: true }
 );
 
 TimeLogSchema.index({ user: 1, startTime: -1 }); // analytics range queries
-
 // DB-level guarantee: a user can only ever have ONE running timer.
 TimeLogSchema.index(
   { user: 1 },

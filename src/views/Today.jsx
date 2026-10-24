@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Calendar, Pause, Play, Plus, Sparkles } from 'lucide-react';
+import { Calendar, Copy, Pause, Play, Plus, Sparkles } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useNow } from '../hooks.js';
@@ -39,7 +39,8 @@ export default function Today() {
   const { tasks, active, startTimer, stopTimer, setOpenTaskId, updateTask, notify } = useStore();
   const [plan, setPlan] = useState(null);
   const [aiPlan, setAiPlan] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [standup, setStandup] = useState(null);
+  const [busy, setBusy] = useState('');
   const now = useNow(!!active);
   const today = todayStr();
 
@@ -62,9 +63,15 @@ export default function Today() {
   const rowProps = { active, startTimer, stopTimer, setOpenTaskId };
 
   const generatePlan = async () => {
-    setBusy(true);
+    setBusy('plan');
     try { setAiPlan(await api.ai.planDay({ capacityHours: capacity })); }
-    catch (e) { notify(e.message); } finally { setBusy(false); }
+    catch (e) { notify(e.message); } finally { setBusy(''); }
+  };
+
+  const generateStandup = async () => {
+    setBusy('standup');
+    try { setStandup(await api.ai.standup()); }
+    catch (e) { notify(e.message); } finally { setBusy(''); }
   };
 
   const applyAiPlan = async () => {
@@ -83,8 +90,11 @@ export default function Today() {
   return (
     <>
       <Topbar title="Today" meta={new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}>
-        <button className="ai-btn" disabled={busy} onClick={generatePlan}>
-          <Sparkles size={13} />{busy ? 'Planning day…' : 'Plan my day'}
+        <button className="ai-btn" disabled={!!busy} onClick={generateStandup}>
+          <Sparkles size={13} />{busy === 'standup' ? 'Drafting…' : 'Daily Standup'}
+        </button>
+        <button className="ai-btn" disabled={!!busy} onClick={generatePlan}>
+          <Sparkles size={13} />{busy === 'plan' ? 'Planning…' : 'Plan my day'}
         </button>
       </Topbar>
       <div className="view"><div className="page">
@@ -97,6 +107,23 @@ export default function Today() {
             <div className="v" style={{ color: free < 0 ? 'var(--red)' : undefined }}>{Math.abs(free).toFixed(1)}h</div>
             <div className="meta" style={{ marginTop: 6 }}>{doneToday} completed today</div></div>
         </div>
+
+        {standup && (
+          <div className="ai-box">
+            <h4>
+              <Sparkles size={14} /> Daily Standup Update
+              <button className="mini-btn" style={{ marginLeft: 'auto' }} onClick={() => { navigator.clipboard.writeText(standup.markdown || ''); notify('Standup copied to clipboard'); }}>
+                <Copy size={12} />Copy Markdown
+              </button>
+              <button className="btn" style={{ height: 26, padding: '0 8px' }} onClick={() => setStandup(null)}>Dismiss</button>
+            </h4>
+            <div className="ai-grid">
+              <div className="ai-sec"><b>Yesterday / Shipped</b>{standup.yesterday?.map((x, i) => <div key={i}>• {x}</div>)}</div>
+              <div className="ai-sec"><b>Today's Focus</b>{standup.today?.map((x, i) => <div key={i}>• {x}</div>)}</div>
+              <div className="ai-sec"><b>Blockers</b>{standup.blockers?.length ? standup.blockers.map((x, i) => <div key={i}>• {x}</div>) : 'None — all clear.'}</div>
+            </div>
+          </div>
+        )}
 
         {aiPlan && (
           <div className="ai-box">
@@ -112,7 +139,7 @@ export default function Today() {
                   <span className="key">{it.key}</span>
                   <span className="ttl">{it.title}</span>
                   <span className="meta">{it.suggestedMinutes}m</span>
-                  <span className={`tag`} style={tagStyle(it.action === 'do_today' ? 'Today' : 'Defer')}>{it.action === 'do_today' ? 'Do Today' : 'Defer'}</span>
+                  <span className="tag" style={tagStyle(it.action === 'do_today' ? 'Today' : 'Defer')}>{it.action === 'do_today' ? 'Do Today' : 'Defer'}</span>
                   <span className="meta">{it.reason}</span>
                 </div>
               ))}

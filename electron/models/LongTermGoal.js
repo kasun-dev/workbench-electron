@@ -16,6 +16,8 @@ const LongTermGoalSchema = new Schema(
     priority: { type: String, enum: PRIORITIES, default: 'low' },
     status: { type: String, enum: GOAL_STATUSES, default: 'someday' },
     targetDate: { type: Date, default: null },
+    targetCost: { type: Number, default: 0, min: 0 },
+    linkedPot: { type: String, default: '', trim: true, maxlength: 60 },
     milestones: { type: [MilestoneSchema], default: [] },
     promotedTasks: [{ type: Schema.Types.ObjectId, ref: 'Task' }], // history of every promotion
   },

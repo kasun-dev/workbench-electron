@@ -1,5 +1,5 @@
 const { Task, TimeLog } = require('../models');
-const { handle, AppError, oid, when } = require('./helpers');
+const { handle, AppError, oid, when, str } = require('./helpers');
 
 const DAY = 864e5;
 
@@ -12,7 +12,6 @@ function range(startTime, endTime) {
   return { start, end, seconds: Math.round((end - start) / 1000) };
 }
 
-// Single source of truth: total = sum of all finished logs
 async function recalc(taskId) {
   const logs = await TimeLog.find({ task: taskId, isRunning: false }).select('durationSeconds').lean();
   const total = logs.reduce((a, l) => a + l.durationSeconds, 0);
@@ -25,7 +24,8 @@ function registerTimeLogHandlers() {
     const task = await Task.findOne({ _id: oid(payload.taskId), user: userId });
     if (!task) throw new AppError('Task not found', 'NOT_FOUND');
     const { start, end, seconds } = range(payload.startTime, payload.endTime);
-    const log = await TimeLog.create({ user: userId, task: task._id, startTime: start, endTime: end, durationSeconds: seconds, isRunning: false, manual: true });
+    const note = str(payload.note || '', { max: 300 });
+    const log = await TimeLog.create({ user: userId, task: task._id, startTime: start, endTime: end, durationSeconds: seconds, isRunning: false, manual: true, note });
     task.timeLogs.push(log._id);
     await task.save();
     return { log: log.toObject(), totalTrackedSeconds: await recalc(task._id) };
@@ -36,7 +36,9 @@ function registerTimeLogHandlers() {
     if (!log) throw new AppError('Entry not found', 'NOT_FOUND');
     if (log.isRunning) throw new AppError('Stop the timer before editing this entry');
     const { start, end, seconds } = range(payload.startTime, payload.endTime);
-    Object.assign(log, { startTime: start, endTime: end, durationSeconds: seconds, manual: true });
+    const patch = { startTime: start, endTime: end, durationSeconds: seconds, manual: true };
+    if (payload.note !== undefined) patch.note = str(payload.note, { max: 300 });
+    Object.assign(log, patch);
     await log.save();
     return { log: log.toObject(), totalTrackedSeconds: await recalc(log.task) };
   });

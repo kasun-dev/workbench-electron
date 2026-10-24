@@ -9,13 +9,14 @@ import { Modal, PriorityIcon, Select } from '../components/ui.jsx';
 
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-function RichEditor({ html, onCommit }) {
+function RichEditor({ title, html, onCommit, notify }) {
   const ref = useRef(null);
   const dirty = useRef(false);
   const timer = useRef();
   const range = useRef(null);
   const [linkOpen, setLinkOpen] = useState(false);
   const [url, setUrl] = useState('');
+  const [writing, setWriting] = useState(false);
 
   useEffect(() => { ref.current.innerHTML = DOMPurify.sanitize(html || ''); }, []); // eslint-disable-line
   const commit = () => {
@@ -50,6 +51,18 @@ function RichEditor({ html, onCommit }) {
     setUrl(''); setLinkOpen(false);
   };
 
+  const aiWriteSpec = async () => {
+    setWriting(true);
+    try {
+      const r = await api.ai.writeSpec({ title, html: ref.current?.innerHTML || '' });
+      if (r.html) {
+        const clean = DOMPurify.sanitize(r.html);
+        ref.current.innerHTML = clean;
+        onCommit(clean);
+      }
+    } catch (e) { notify(e.message); } finally { setWriting(false); }
+  };
+
   return (
     <div className="editor">
       <div className="toolbar">
@@ -64,8 +77,11 @@ function RichEditor({ html, onCommit }) {
             <button className="btn" style={{ height: 26 }}>Add</button>
           </form>
         )}
+        <button type="button" className="ai-btn" style={{ marginLeft: 'auto', height: 24 }} disabled={writing} onClick={aiWriteSpec} title="Turn rough notes into a clean technical spec">
+          <Sparkles size={11} />{writing ? 'Writing…' : 'AI Spec'}
+        </button>
       </div>
-      <div ref={ref} className="editor-body" contentEditable suppressContentEditableWarning data-ph="Add a description…"
+      <div ref={ref} className="editor-body" contentEditable suppressContentEditableWarning data-ph="Add rough notes or click AI Spec…"
         onInput={touch} onBlur={commit} />
     </div>
   );
@@ -79,7 +95,7 @@ export default function TaskModal() {
   const [sub, setSub] = useState('');
   const [confirm, setConfirm] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [draft, setDraft] = useState({ start: '', end: '' });
+  const [draft, setDraft] = useState({ start: '', end: '', note: '' });
   const [adding, setAdding] = useState(false);
   const [aiBusy, setAiBusy] = useState('');
   const [estInfo, setEstInfo] = useState(null);
@@ -121,7 +137,6 @@ export default function TaskModal() {
     setSubs([...task.subtasks, { title: sub.trim(), done: false }]); setSub('');
   };
 
-  // ---- AI actions ----
   const aiBreakdown = async () => {
     setAiBusy('sub');
     try {
@@ -146,30 +161,26 @@ export default function TaskModal() {
 
   const aiEstimate = async () => {
     setAiBusy('est');
-    try {
-      const r = await api.ai.estimate({ title: task.title, category: task.category });
-      setEstInfo(r);
-    } catch (e) { notify(e.message); } finally { setAiBusy(''); }
+    try { setEstInfo(await api.ai.estimate({ title: task.title, category: task.category })); }
+    catch (e) { notify(e.message); } finally { setAiBusy(''); }
   };
 
   const aiUnblock = async () => {
     setAiBusy('unblock');
-    try {
-      const r = await api.ai.unblock(task._id);
-      setUnblockInfo(r);
-    } catch (e) { notify(e.message); } finally { setAiBusy(''); }
+    try { setUnblockInfo(await api.ai.unblock(task._id)); }
+    catch (e) { notify(e.message); } finally { setAiBusy(''); }
   };
 
-  // ---- time log editing ----
-  const startEdit = (l) => { setAdding(false); setEditId(l._id); setDraft({ start: toLocalInput(l.startTime), end: toLocalInput(l.endTime) }); };
+  // ---- time log editing (with session note) ----
+  const startEdit = (l) => { setAdding(false); setEditId(l._id); setDraft({ start: toLocalInput(l.startTime), end: toLocalInput(l.endTime), note: l.note || '' }); };
   const startAdd = () => {
     setEditId(null); setAdding(true);
     const end = new Date(); const start = new Date(end.getTime() - 30 * 60000);
-    setDraft({ start: toLocalInput(start), end: toLocalInput(end) });
+    setDraft({ start: toLocalInput(start), end: toLocalInput(end), note: '' });
   };
   const saveLog = async () => {
     try {
-      const body = { startTime: fromLocalInput(draft.start), endTime: fromLocalInput(draft.end) };
+      const body = { startTime: fromLocalInput(draft.start), endTime: fromLocalInput(draft.end), note: draft.note };
       const r = adding ? await api.timelogs.create({ taskId: task._id, ...body }) : await api.timelogs.update({ id: editId, ...body });
       patchTask(task._id, { totalTrackedSeconds: r.totalTrackedSeconds });
       setEditId(null); setAdding(false); reloadLogs();
@@ -184,12 +195,16 @@ export default function TaskModal() {
   };
 
   const editor = (
-    <div className="log-edit">
-      <input type="datetime-local" step="1" className="field" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value })} />
-      <span>→</span>
-      <input type="datetime-local" step="1" className="field" value={draft.end} onChange={(e) => setDraft({ ...draft, end: e.target.value })} />
-      <button className="tb" title="Save" onClick={saveLog}><Check size={15} /></button>
-      <button className="tb" title="Cancel" onClick={() => { setEditId(null); setAdding(false); }}><X size={15} /></button>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div className="log-edit">
+        <input type="datetime-local" step="1" className="field" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value })} />
+        <span>→</span>
+        <input type="datetime-local" step="1" className="field" value={draft.end} onChange={(e) => setDraft({ ...draft, end: e.target.value })} />
+        <button className="tb" title="Save" onClick={saveLog}><Check size={15} /></button>
+        <button className="tb" title="Cancel" onClick={() => { setEditId(null); setAdding(false); }}><X size={15} /></button>
+      </div>
+      <input className="field" style={{ height: 28, fontSize: 12 }} placeholder="Session note (e.g. Fixed JWT refresh race condition)…"
+        value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && saveLog()} />
     </div>
   );
 
@@ -221,7 +236,7 @@ export default function TaskModal() {
           <input className="modal-title" value={title} onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
             onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />
 
-          <RichEditor key={task._id} html={task.description} onCommit={(h) => updateTask(task._id, { description: h })} />
+          <RichEditor key={task._id} title={task.title} html={task.description} notify={notify} onCommit={(h) => updateTask(task._id, { description: h })} />
 
           {unblockInfo && (
             <div className="ai-box" style={{ marginTop: 14 }}>
@@ -253,17 +268,20 @@ export default function TaskModal() {
           <div className="section-head">Time logs
             <button className="mini-btn" style={{ marginLeft: 'auto' }} onClick={startAdd}><Plus size={12} />Add time</button></div>
           <div className="logs">
-            <div className="row head"><span>#</span><span>Start Time</span><span>End Time</span><span className="r">Duration</span><span /></div>
+            <div className="row head"><span>#</span><span>Start Time</span><span>End Time / Note</span><span className="r">Duration</span><span /></div>
             {logs.length === 0 && !adding && <div className="none">No time tracked yet.</div>}
             {logs.map((l, i) => (editId === l._id ? <div key={l._id} className="row edit">{editor}</div> : (
               <div className="row" key={l._id}>
                 <span>{String(i + 1).padStart(2, '0')}</span>
                 <span className="strong">{fmtDateTime(l.startTime)}{l.manual && <em className="manual" title="Added or edited by hand"> ·m</em>}</span>
-                <span className={l.isRunning ? 'run' : ''}>{l.isRunning ? '● running' : fmtDateTime(l.endTime)}</span>
+                <span className={l.isRunning ? 'run' : ''}>
+                  {l.isRunning ? '● running' : fmtDateTime(l.endTime)}
+                  {l.note && <div className="meta" style={{ color: 'var(--text)', marginTop: 2 }}>{l.note}</div>}
+                </span>
                 <span className="r strong">{hms(dur(l))}</span>
                 <span className="acts">
                   {!l.isRunning && <>
-                    <button className="tb sm" title="Edit" onClick={() => startEdit(l)}><Pencil size={12} /></button>
+                    <button className="tb sm" title="Edit / Add note" onClick={() => startEdit(l)}><Pencil size={12} /></button>
                     <button className="tb sm" title="Delete" onClick={() => removeLog(l)}><Trash2 size={12} /></button>
                   </>}
                 </span>

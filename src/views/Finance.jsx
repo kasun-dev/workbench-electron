@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, Copy, Download, Pencil, Plus, Repeat, Sparkles, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Copy, Download, ImagePlus, Pencil, Plus, Repeat, SlidersHorizontal, Sparkles, Trash2 } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { Modal, Segmented, Topbar } from '../components/ui.jsx';
@@ -16,9 +16,40 @@ const POTS = ['Emergency fund', 'General'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const SIGN = { income: '+', expense: '−', saving: '→' };
 
+function BudgetModal({ budgets, categories, cur, onClose, onSave }) {
+  const allCats = [...new Set([...SUGGEST.expense, ...categories])];
+  const [draft, setDraft] = useState(() => ({ ...budgets }));
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try { await onSave(draft); onClose(); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal small onClose={onClose}>
+      <form onSubmit={submit} style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <h3 style={{ fontSize: 16 }}>Monthly Category Budgets ({cur})</h3>
+        <p className="meta">Set monthly caps per category. Bars turn amber at 80% and red above 100%.</p>
+        <div className="grid2" style={{ maxHeight: 320, overflowY: 'auto', paddingRight: 4 }}>
+          {allCats.map((c) => (
+            <label key={c} className="fl">
+              <span>{c}</span>
+              <input className="field mono" type="number" min="0" step="100" placeholder="No cap"
+                value={draft[c] || ''} onChange={(e) => setDraft({ ...draft, [c]: e.target.value })} />
+            </label>
+          ))}
+        </div>
+        <button className="btn primary block" disabled={busy} type="submit">Save budgets</button>
+      </form>
+    </Modal>
+  );
+}
+
 function TxForm({ tx, month, categories, pots, onClose, onSaved }) {
   const [f, setF] = useState(() => (tx
-    ? { type: tx.type, amount: String(tx.amount), date: tx.date, category: tx.category, note: tx.note, pot: tx.pot, recurring: tx.recurring }
+    ? { type: tx.type || 'expense', amount: String(tx.amount || ''), date: tx.date || todayStr(), category: tx.category || '', note: tx.note || '', pot: tx.pot || '', recurring: !!tx.recurring }
     : { type: 'expense', amount: '', date: month === curMonth() ? todayStr() : `${month}-01`, category: '', note: '', pot: '', recurring: false }));
   const [err, setErr] = useState('');
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -27,7 +58,7 @@ function TxForm({ tx, month, categories, pots, onClose, onSaved }) {
   const submit = async (e) => {
     e.preventDefault(); setErr('');
     try {
-      if (tx) await api.finance.update(tx._id, f); else await api.finance.create(f);
+      if (tx?._id) await api.finance.update(tx._id, f); else await api.finance.create(f);
       onSaved(f.date.slice(0, 7));
     } catch (ex) { setErr(ex.message); }
   };
@@ -55,25 +86,28 @@ function TxForm({ tx, month, categories, pots, onClose, onSaved }) {
           <span>Repeats every month <span className="meta">(can be carried over to the next month in one click)</span></span>
         </label>
         {err && <div className="err">{err}</div>}
-        <button className="btn primary block" type="submit">{tx ? 'Save changes' : 'Add transaction'}</button>
+        <button className="btn primary block" type="submit">{tx?._id ? 'Save changes' : 'Add transaction'}</button>
       </form>
     </Modal>
   );
 }
 
 export default function Finance() {
-  const { user, notify } = useStore();
+  const { user, setUser, notify } = useStore();
   const cur = user.preferences.currency || 'LKR';
+  const budgets = user.preferences.budgets || {};
   const [month, setMonth] = useState(curMonth());
   const [data, setData] = useState(null);
   const [year, setYear] = useState(null);
   const [filter, setFilter] = useState('all');
   const [form, setForm] = useState(null);
+  const [budgetOpen, setBudgetOpen] = useState(false);
   const [delId, setDelId] = useState(null);
   const [nlText, setNlText] = useState('');
   const [nlBusy, setNlBusy] = useState(false);
   const [insights, setInsights] = useState(null);
   const [insBusy, setInsBusy] = useState(false);
+  const slipRef = useRef(null);
   const m = (n) => money(n, cur);
 
   const load = useCallback(async () => {
@@ -109,10 +143,37 @@ export default function Finance() {
     } catch (ex) { notify(ex.message); } finally { setNlBusy(false); }
   };
 
+  const scanSlipFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const base64 = String(reader.result || '').split(',')[1];
+      if (!base64) return;
+      setNlBusy(true);
+      try {
+        const parsed = await api.ai.scanReceipt({ imageBase64: base64, mimeType: file.type || 'image/png' });
+        setForm(parsed); // Opens TxForm pre-filled so you can review and save in 1 click
+        notify('Receipt scanned — review & click Add transaction');
+      } catch (e) { notify(e.message); } finally { setNlBusy(false); }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const onPasteSlip = (e) => {
+    const item = [...(e.clipboardData?.items || [])].find((x) => x.type.startsWith('image/'));
+    if (item) { e.preventDefault(); scanSlipFile(item.getAsFile()); }
+  };
+
   const loadInsights = async () => {
     setInsBusy(true);
     try { setInsights(await api.ai.financeInsights({ currency: cur, monthData: data, yearData: year })); }
     catch (ex) { notify(ex.message); } finally { setInsBusy(false); }
+  };
+
+  const saveBudgets = async (nextBudgets) => {
+    const u = await api.user.updatePreferences({ budgets: nextBudgets });
+    setUser(u);
+    notify('Monthly budgets updated');
   };
 
   const remove = async (id) => {
@@ -139,17 +200,22 @@ export default function Finance() {
           {month !== curMonth() && <button className="btn" onClick={() => setMonth(curMonth())}>This month</button>}
         </div>
         <button className="ai-btn" disabled={insBusy} onClick={loadInsights}><Sparkles size={13} />{insBusy ? 'Analyzing…' : 'AI Insights'}</button>
+        <button className="btn" onClick={() => setBudgetOpen(true)}><SlidersHorizontal size={14} />Budgets</button>
         <button className="btn" onClick={carry} title={`Copy recurring items from ${monthLabel(shiftMonth(month, -1))}`}><Copy size={14} />Carry over</button>
         <button className="icon-btn" onClick={exportCsv} title="Export month as CSV"><Download size={15} /></button>
         <button className="btn primary" onClick={() => setForm({})}><Plus size={14} />Add</button>
       </Topbar>
 
-      <div className="view"><div className="page">
+      <div className="view" onPaste={onPasteSlip}><div className="page">
         <form className="ai-bar" onSubmit={submitPlainEnglish}>
           <Sparkles size={15} style={{ color: 'var(--purple)' }} />
-          <input placeholder='Plain-English entry: e.g. "Spent 4500 on fuel yesterday" or "Saved 20000 to Bike pot"'
+          <input placeholder='Plain-English or Ctrl+V receipt image: e.g. "Spent 4500 on fuel yesterday"'
             value={nlText} onChange={(e) => setNlText(e.target.value)} disabled={nlBusy} />
-          <button className="ai-btn" type="submit" disabled={nlBusy || !nlText.trim()}>{nlBusy ? 'Adding…' : 'Add with AI'}</button>
+          <input ref={slipRef} type="file" accept="image/*" hidden onChange={(e) => scanSlipFile(e.target.files?.[0])} />
+          <button className="ai-btn" type="button" disabled={nlBusy} onClick={() => slipRef.current?.click()} title="Upload receipt or bank slip image">
+            <ImagePlus size={13} />Scan Slip
+          </button>
+          <button className="ai-btn" type="submit" disabled={nlBusy || !nlText.trim()}>{nlBusy ? 'Working…' : 'Add with AI'}</button>
         </form>
 
         {insights && (
@@ -222,15 +288,26 @@ export default function Finance() {
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <div className="panel">
-              <h3>Where it went</h3><div className="sub-t">Expenses by category</div>
+              <h3>Where it went</h3><div className="sub-t">Expenses by category &amp; budget burn</div>
               <div style={{ marginTop: 14 }}>
                 {data.expenseByCategory.length === 0 && <div className="empty">No expenses yet</div>}
-                {data.expenseByCategory.map((c) => (
-                  <div className="cat-row" key={c.name}>
-                    <div className="cat-top"><span>{c.name}</span><span className="mono">{m(c.amount)} <em>{t.expense ? Math.round((c.amount / t.expense) * 100) : 0}%</em></span></div>
-                    <div className="hbar red"><i style={{ width: `${(c.amount / maxExp) * 100}%` }} /></div>
-                  </div>
-                ))}
+                {data.expenseByCategory.map((c) => {
+                  const cap = Number(budgets[c.name]) || 0;
+                  const ratio = cap > 0 ? (c.amount / cap) * 100 : (c.amount / maxExp) * 100;
+                  const barColor = cap > 0 ? (ratio > 100 ? 'var(--red)' : ratio >= 80 ? 'var(--amber)' : 'var(--accent)') : 'var(--red)';
+                  return (
+                    <div className="cat-row" key={c.name}>
+                      <div className="cat-top">
+                        <span>{c.name}</span>
+                        <span className="mono">
+                          {m(c.amount)}{cap > 0 ? ` / ${m(cap)}` : ''}
+                          <em>{cap > 0 ? `${Math.round(ratio)}%` : `${t.expense ? Math.round((c.amount / t.expense) * 100) : 0}%`}</em>
+                        </span>
+                      </div>
+                      <div className="hbar"><i style={{ width: `${Math.min(100, ratio)}%`, background: barColor }} /></div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -284,8 +361,13 @@ export default function Finance() {
         </div>
       </div></div>
 
+      {budgetOpen && (
+        <BudgetModal budgets={budgets} categories={categories.expense} cur={cur}
+          onClose={() => setBudgetOpen(false)} onSave={saveBudgets} />
+      )}
+
       {form && (
-        <TxForm tx={form._id ? form : null} month={month} categories={categories} pots={data.pots.map((p) => p.name)}
+        <TxForm tx={form} month={month} categories={categories} pots={data.pots.map((p) => p.name)}
           onClose={() => setForm(null)}
           onSaved={(saved) => { setForm(null); if (saved !== month) setMonth(saved); else load(); }} />
       )}

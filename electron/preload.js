@@ -1,6 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Unwraps { ok, data | error } so React code can just use try/catch.
 async function call(channel, payload) {
   const res = await ipcRenderer.invoke(channel, payload);
   if (!res.ok) {
@@ -13,7 +12,6 @@ async function call(channel, payload) {
 
 const EVENTS = ['timer:changed', 'idle:prompt', 'cmd:capture'];
 
-// Explicit surface: only these channels exist from the renderer's point of view.
 contextBridge.exposeInMainWorld('api', {
   auth: {
     register: (p) => call('auth:register', p),
@@ -87,8 +85,13 @@ contextBridge.exposeInMainWorld('api', {
     parseFinance: (text) => call('ai:parseFinance', { text }),
     financeInsights: (p) => call('ai:financeInsights', p),
     askData: (question) => call('ai:askData', { question }),
+    agentCommand: (command) => call('ai:agentCommand', { command }),
     semanticSearch: (query) => call('ai:semanticSearch', { query }),
     summarizeTimesheet: (p) => call('ai:summarizeTimesheet', p),
+    scanReceipt: (p) => call('ai:scanReceipt', p),
+    imageToTask: (p) => call('ai:imageToTask', p),
+    standup: () => call('ai:standup'),
+    writeSpec: (p) => call('ai:writeSpec', p),
   },
   events: {
     on: (channel, cb) => {

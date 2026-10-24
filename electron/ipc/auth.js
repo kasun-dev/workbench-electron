@@ -8,7 +8,6 @@ const { handle, AppError, str, oneOf, int } = require('./helpers');
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const ROUNDS = 12;
 
-// naive brute-force guard: 5 failures -> 60s lockout per email
 const attempts = new Map();
 function checkLock(email) {
   const a = attempts.get(email);
@@ -21,6 +20,7 @@ function fail(email) {
 }
 
 const publicUser = (u) => ({ id: u._id, email: u.email, displayName: u.displayName, preferences: u.preferences });
+
 const applyTheme = (u) => {
   nativeTheme.themeSource = u.preferences?.theme || 'dark';
   idle.setThreshold(u.preferences?.idleMinutes ?? 10);
@@ -62,7 +62,6 @@ function register() {
 
   handle('auth:logout', async () => { session.clear(); return true; }, { auth: false });
 
-  // Called by React on launch to decide between the login screen and the board
   handle('auth:session', async () => {
     const id = session.userId();
     if (!id) return null;
@@ -119,6 +118,15 @@ function settings() {
       const w = payload.weeklyPlan;
       if (!Array.isArray(w) || w.length !== 7 || w.some((h) => typeof h !== 'number' || h < 0 || h > 24)) throw new AppError('Weekly plan needs 7 values between 0 and 24');
       set['preferences.weeklyPlan'] = w;
+    }
+    if (payload.budgets !== undefined && typeof payload.budgets === 'object' && payload.budgets !== null) {
+      const clean = {};
+      for (const [k, v] of Object.entries(payload.budgets)) {
+        const key = str(k, { max: 60 });
+        const amt = Number(v);
+        if (key && Number.isFinite(amt) && amt > 0) clean[key] = Math.round(amt * 100) / 100;
+      }
+      set['preferences.budgets'] = clean;
     }
     const user = await User.findByIdAndUpdate(userId, { $set: set }, { new: true });
     applyTheme(user);

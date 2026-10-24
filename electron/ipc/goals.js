@@ -1,4 +1,4 @@
-const { LongTermGoal, Task, GOAL_STATUSES, PRIORITIES } = require('../models');
+const { LongTermGoal, Task, Transaction, GOAL_STATUSES, PRIORITIES } = require('../models');
 const { handle, AppError, str, oneOf, oid } = require('./helpers');
 const { createTask } = require('./tasks');
 
@@ -11,6 +11,11 @@ function pickGoalFields(p) {
   if (p.priority !== undefined) out.priority = oneOf(p.priority, PRIORITIES);
   if (p.status !== undefined) out.status = oneOf(p.status, GOAL_STATUSES);
   if (p.targetDate !== undefined) out.targetDate = p.targetDate ? new Date(p.targetDate) : null;
+  if (p.targetCost !== undefined) {
+    const c = Number(p.targetCost);
+    out.targetCost = Number.isFinite(c) && c >= 0 ? Math.round(c * 100) / 100 : 0;
+  }
+  if (p.linkedPot !== undefined) out.linkedPot = str(p.linkedPot, { max: 60 });
   if (p.milestones !== undefined) {
     if (!Array.isArray(p.milestones) || p.milestones.length > 100) throw new AppError('Invalid milestones');
     out.milestones = p.milestones.map((m) => ({
@@ -27,38 +32,57 @@ const mine = async (userId, id) => {
   return g;
 };
 
+async function potMapFor(userId) {
+  const saved = await Transaction.find({ user: userId, type: 'saving' }).select('amount pot').lean();
+  const pots = new Map();
+  for (const x of saved) {
+    const k = (x.pot || 'General').toLowerCase();
+    pots.set(k, (pots.get(k) || 0) + Math.round(x.amount * 100));
+  }
+  return pots;
+}
+
 function registerGoalHandlers() {
-  // Each goal also reports progress from its promoted tasks (done count + time actually tracked)
   handle('goals:list', async ({ userId }) => {
-    const goals = await LongTermGoal.find({ user: userId }).sort({ status: 1, createdAt: -1 }).lean();
+    const [goals, pots] = await Promise.all([
+      LongTermGoal.find({ user: userId }).sort({ status: 1, createdAt: -1 }).lean(),
+      potMapFor(userId),
+    ]);
     const ids = goals.flatMap((g) => g.promotedTasks);
     const tasks = ids.length ? await Task.find({ _id: { $in: ids } }).select('status totalTrackedSeconds').lean() : [];
     const map = new Map(tasks.map((t) => [String(t._id), t]));
     return goals.map((g) => {
       const ts = g.promotedTasks.map((id) => map.get(String(id))).filter(Boolean);
+      const potSaved = g.linkedPot ? (pots.get(g.linkedPot.toLowerCase()) || 0) / 100 : 0;
       return {
         ...g,
+        potSaved,
         trackedSeconds: ts.reduce((a, t) => a + t.totalTrackedSeconds, 0),
         tasksDone: ts.filter((t) => t.status === 'completed').length,
         tasksTotal: ts.length,
       };
     });
   });
+
   handle('goals:create', async ({ userId, payload }) =>
     (await LongTermGoal.create({ title: 'Untitled goal', ...pickGoalFields(payload), user: userId })).toObject());
+
   handle('goals:update', async ({ userId, payload }) => {
     const g = await mine(userId, payload.id);
     Object.assign(g, pickGoalFields(payload.changes || {}));
     await g.save();
-    return g.toObject();
+    const pots = await potMapFor(userId);
+    const obj = g.toObject();
+    obj.potSaved = obj.linkedPot ? (pots.get(obj.linkedPot.toLowerCase()) || 0) / 100 : 0;
+    return obj;
   });
+
   handle('goals:delete', async ({ userId, payload }) => {
     const g = await mine(userId, payload.id);
-    await g.deleteOne(); // promoted tasks are real work history and are kept
+    await g.deleteOne();
     return { id: String(g._id) };
   });
 
-  // Promote: goal -> real Kanban task. Unfinished milestones become sub-tasks.
   handle('goals:promote', async ({ userId, payload }) => {
     const g = await mine(userId, payload.id);
     if (['achieved', 'archived'].includes(g.status)) throw new AppError('Reopen this goal before promoting it');

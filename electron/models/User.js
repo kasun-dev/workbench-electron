@@ -23,6 +23,7 @@ const UserSchema = new Schema(
       },
       autoStartBreaks: { type: Boolean, default: false },
       weeklyPlan: { type: [Number], default: [8, 8, 8, 8, 6, 3, 0] }, // planned hours Mon..Sun (Analytics)
+      budgets: { type: Schema.Types.Mixed, default: {} },             // { [category]: monthlyCapNumber }
     },
   },
   { timestamps: true }

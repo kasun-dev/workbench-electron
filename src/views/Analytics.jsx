@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
-import { Download, Sparkles } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Download, Printer, Sparkles } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { Modal, Topbar } from '../components/ui.jsx';
-import { tagStyle, todayStr } from '../lib.js';
+import { money, tagStyle, todayStr } from '../lib.js';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const COLORS = ['var(--accent)', 'var(--blue)', 'var(--pink)', 'var(--amber)', 'var(--purple)', 'var(--muted)'];
@@ -69,17 +69,22 @@ function Heatmap({ days }) {
 }
 
 function ExportDialog({ onClose }) {
-  const { notify } = useStore();
+  const { user, tasks, notify } = useStore();
+  const cur = user?.preferences?.currency || 'LKR';
   const t = todayStr();
   const [from, setFrom] = useState(`${t.slice(0, 8)}01`);
   const [to, setTo] = useState(t);
+  const [category, setCategory] = useState('');
+  const [hourlyRate, setHourlyRate] = useState('');
   const [aiSummary, setAiSummary] = useState(true);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  const cats = useMemo(() => [...new Set(tasks.map((x) => x.category).filter(Boolean))], [tasks]);
+
   const loadPreview = async () => {
     setBusy(true);
-    try { setPreview(await api.ai.summarizeTimesheet({ from, to })); }
+    try { setPreview(await api.ai.summarizeTimesheet({ from, to, category })); }
     catch (e) { notify(e.message); } finally { setBusy(false); }
   };
 
@@ -91,32 +96,51 @@ function ExportDialog({ onClose }) {
     } catch (e) { notify(e.message); } finally { setBusy(false); }
   };
 
+  const totalHours = preview ? Math.round(preview.reduce((a, b) => a + b.hours, 0) * 100) / 100 : 0;
+  const rate = Number(hourlyRate) || 0;
+
   return (
-    <Modal small onClose={onClose}>
+    <Modal onClose={onClose}>
       <div style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <h3 style={{ fontSize: 16 }}>Export timesheet (CSV)</h3>
+        <h3 style={{ fontSize: 16 }}>Export Timesheet &amp; Client Invoice Report</h3>
         <div className="grid2">
           <label className="fl"><span>From</span><input className="field" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
           <label className="fl"><span>To</span><input className="field" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+          <label className="fl"><span>Category / Client filter (optional)</span>
+            <input className="field" list="exp-cats" placeholder="All categories" value={category} onChange={(e) => setCategory(e.target.value)} />
+            <datalist id="exp-cats">{cats.map((c) => <option key={c} value={c} />)}</datalist>
+          </label>
+          <label className="fl"><span>Hourly rate ({cur}, optional)</span>
+            <input className="field mono" type="number" min="0" step="100" placeholder="e.g. 3500" value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} />
+          </label>
         </div>
         <label className="check-row" style={{ padding: 0 }} onClick={() => setAiSummary(!aiSummary)}>
           <span className={`box ${aiSummary ? 'on' : ''}`}>{aiSummary && '✓'}</span>
           <span><Sparkles size={12} style={{ color: 'var(--purple)', marginRight: 4 }} />Include AI client-friendly session summaries</span>
         </label>
         {preview && (
-          <div className="ai-box" style={{ maxHeight: 180, overflowY: 'auto' }}>
-            <h4><Sparkles size={13} /> Client-Friendly Summary Lines</h4>
-            {preview.map((p, i) => (
-              <div key={i} style={{ fontSize: 12 }}><span className="mono meta">{p.date} · {p.key}:</span> {p.line}</div>
-            ))}
+          <div className="ai-box" style={{ maxHeight: 260, overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4><Sparkles size={13} /> {category || 'All Work'} — {totalHours}h {rate > 0 ? `· Total: ${money(totalHours * rate, cur)}` : ''}</h4>
+              <button className="mini-btn" onClick={() => window.print()}><Printer size={12} />Print / Save PDF</button>
+            </div>
+            <div className="logs">
+              <div className="row head" style={{ gridTemplateColumns: '90px 70px 1fr 70px' }}>
+                <span>Date</span><span>Task</span><span>AI Client Summary</span><span className="r">Hours</span>
+              </div>
+              {preview.map((p, i) => (
+                <div key={i} className="row" style={{ gridTemplateColumns: '90px 70px 1fr 70px' }}>
+                  <span>{p.date}</span><span className="key">{p.key}</span><span>{p.line}</span><span className="r strong">{p.hours}h</span>
+                </div>
+              ))}
+            </div>
           </div>
         )}
-        <p className="meta">One row per tracked session with task, category, discipline, duration{aiSummary ? ' and AI client summary' : ''}.</p>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="ai-btn" style={{ height: 36, padding: '0 14px' }} disabled={busy} onClick={loadPreview}>
-            <Sparkles size={13} />Preview AI lines
+            <Sparkles size={13} />{busy ? 'Generating…' : 'Generate AI Invoice Preview'}
           </button>
-          <button className="btn primary block" style={{ flex: 1 }} disabled={busy} onClick={go}><Download size={14} />{busy ? 'Working…' : 'Export CSV'}</button>
+          <button className="btn primary block" style={{ flex: 1 }} disabled={busy} onClick={go}><Download size={14} />Export CSV</button>
         </div>
       </div>
     </Modal>
@@ -139,7 +163,7 @@ export default function Analytics() {
   return (
     <>
       <Topbar title="Analytics">
-        <button className="btn" onClick={() => setExporting(true)}><Download size={14} />Export timesheet</button>
+        <button className="btn" onClick={() => setExporting(true)}><Download size={14} />Timesheet &amp; Invoice</button>
       </Topbar>
       <div className="view"><div className="page">
         <div className="stats">
