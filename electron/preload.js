@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('api', {
     imageToTask: (p) => call('ai:imageToTask', p),
     standup: () => call('ai:standup'),
     writeSpec: (p) => call('ai:writeSpec', p),
+    analyticsInsights: (analyticsData) => call('ai:analyticsInsights', { analyticsData }),
   },
   events: {
     on: (channel, cb) => {

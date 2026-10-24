@@ -374,3 +374,30 @@ html.mini, html.mini body, html.mini #root { background: transparent; overflow: 
 .ai-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .ai-sec { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5; }
 .ai-sec b { display: block; font: 10px var(--mono); letter-spacing: .12em; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+
+/* Interactive chart hover tooltips */
+.chart-tip {
+  position: fixed;
+  z-index: 120;
+  pointer-events: none;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-left: 3px solid var(--accent);
+  padding: 7px 11px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font: 11.5px/1.45 var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+  transform: translate(14px, -50%);
+}
+.chart-tip b { color: var(--accent); font-weight: 600; }
+.chart-tip .muted { color: var(--muted); display: block; font-size: 10.5px; }
+.day:hover .bar { filter: brightness(1.2); }
+.day:hover .dlabel { color: var(--text); font-weight: 600; }
+.bar { transition: height .3s, filter .15s, transform .15s; cursor: pointer; }
+.bar:hover { transform: scaleX(1.12); }
+.donut svg circle { transition: stroke-width .15s, opacity .15s; cursor: pointer; }
+.donut svg circle.dim { opacity: 0.35; }
+.hc { transition: transform .1s, border-color .1s; cursor: pointer; }
+.hc:hover:not(.blank) { transform: scale(1.45); outline: 1px solid var(--text); z-index: 2; position: relative; }

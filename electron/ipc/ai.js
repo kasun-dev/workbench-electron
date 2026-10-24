@@ -468,6 +468,34 @@ Year Overview: ${JSON.stringify(payload.yearData)}`,
     );
   });
 
+  // Analytics AI Coach & Weekly Plan Optimizer
+  handle('ai:analyticsInsights', async ({ payload }) => {
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        headline: { type: 'STRING' },
+        capacityAnalysis: { type: 'STRING' },
+        allocationInsight: { type: 'STRING' },
+        burnoutOrPacingTip: { type: 'STRING' },
+        suggestedWeeklyPlan: {
+          type: 'ARRAY',
+          items: { type: 'NUMBER' },
+        },
+        planReason: { type: 'STRING' },
+      },
+      required: ['headline', 'capacityAnalysis', 'allocationInsight', 'burnoutOrPacingTip', 'suggestedWeeklyPlan', 'planReason'],
+    };
+    return generateJson(
+      `Analyze the user's Workbench Analytics summary and provide sharp, personalized productivity coaching:
+${JSON.stringify(payload.analyticsData)}
+Rules:
+1. Reference their exact numbers (e.g. Planned vs Actual hours, accuracy %, discipline split like development vs IELTS, current streak, and session count).
+2. If their Planned hours (e.g. 105h/week) are unrealistically high compared to their Actual tracked hours, call it out constructively and propose a realistic 7-day Mon..Sun weekly plan array (7 numbers between 0 and 12) in "suggestedWeeklyPlan".
+3. Keep each insight 1-2 sentences, concrete and actionable.`,
+      schema
+    );
+  });
+
   // 12 & Pack 3. Ask Your Data + Agentic Action Mode (Read + Write Tools)
   async function runPaletteAi(userId, question, allowWrite = false) {
     const today = ymd(new Date());
