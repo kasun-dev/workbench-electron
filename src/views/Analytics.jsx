@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Download } from 'lucide-react';
+import { Download, Sparkles } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { Modal, Topbar } from '../components/ui.jsx';
@@ -56,7 +56,7 @@ function Trend({ data }) {
 
 function Heatmap({ days }) {
   const first = new Date(`${days[0].d}T12:00:00`);
-  const pad = (first.getDay() + 6) % 7; // Monday-first
+  const pad = (first.getDay() + 6) % 7;
   const lvl = (h) => (h <= 0 ? 0 : h < 1 ? 1 : h < 3 ? 2 : h < 5 ? 3 : 4);
   return (
     <div className="heat-wrap">
@@ -73,14 +73,24 @@ function ExportDialog({ onClose }) {
   const t = todayStr();
   const [from, setFrom] = useState(`${t.slice(0, 8)}01`);
   const [to, setTo] = useState(t);
+  const [aiSummary, setAiSummary] = useState(true);
+  const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  const loadPreview = async () => {
+    setBusy(true);
+    try { setPreview(await api.ai.summarizeTimesheet({ from, to })); }
+    catch (e) { notify(e.message); } finally { setBusy(false); }
+  };
+
   const go = async () => {
     setBusy(true);
     try {
-      const r = await api.data.exportTimesheet({ from, to });
+      const r = await api.data.exportTimesheet({ from, to, aiSummary });
       if (r.saved) { notify(`Exported ${r.count} entries (${r.hours}h)`); onClose(); }
     } catch (e) { notify(e.message); } finally { setBusy(false); }
   };
+
   return (
     <Modal small onClose={onClose}>
       <div style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -89,8 +99,25 @@ function ExportDialog({ onClose }) {
           <label className="fl"><span>From</span><input className="field" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
           <label className="fl"><span>To</span><input className="field" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
         </div>
-        <p className="meta">One row per tracked session with task, category, discipline and duration. Opens in Excel or Sheets.</p>
-        <button className="btn primary block" disabled={busy} onClick={go}><Download size={14} />Export CSV</button>
+        <label className="check-row" style={{ padding: 0 }} onClick={() => setAiSummary(!aiSummary)}>
+          <span className={`box ${aiSummary ? 'on' : ''}`}>{aiSummary && '✓'}</span>
+          <span><Sparkles size={12} style={{ color: 'var(--purple)', marginRight: 4 }} />Include AI client-friendly session summaries</span>
+        </label>
+        {preview && (
+          <div className="ai-box" style={{ maxHeight: 180, overflowY: 'auto' }}>
+            <h4><Sparkles size={13} /> Client-Friendly Summary Lines</h4>
+            {preview.map((p, i) => (
+              <div key={i} style={{ fontSize: 12 }}><span className="mono meta">{p.date} · {p.key}:</span> {p.line}</div>
+            ))}
+          </div>
+        )}
+        <p className="meta">One row per tracked session with task, category, discipline, duration{aiSummary ? ' and AI client summary' : ''}.</p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="ai-btn" style={{ height: 36, padding: '0 14px' }} disabled={busy} onClick={loadPreview}>
+            <Sparkles size={13} />Preview AI lines
+          </button>
+          <button className="btn primary block" style={{ flex: 1 }} disabled={busy} onClick={go}><Download size={14} />{busy ? 'Working…' : 'Export CSV'}</button>
+        </div>
       </div>
     </Modal>
   );
@@ -100,6 +127,7 @@ export default function Analytics() {
   const { active, notify } = useStore();
   const [d, setD] = useState(null);
   const [exporting, setExporting] = useState(false);
+
   useEffect(() => { api.analytics.summary().then(setD).catch((e) => notify(e.message)); }, [active?.logId]); // eslint-disable-line
 
   if (!d) return <Topbar title="Analytics" />;
@@ -120,6 +148,7 @@ export default function Analytics() {
           <div className="stat"><div className="k">ACCURACY</div><div className="v">{d.accuracy}%</div></div>
           <div className="stat"><div className="k">FOCUS SESSIONS</div><div className="v">{d.sessions}</div></div>
         </div>
+
         <div className="charts">
           <div className="panel">
             <div style={{ display: 'flex', alignItems: 'flex-start' }}>
@@ -144,6 +173,7 @@ export default function Analytics() {
               </div>
             </div>
           </div>
+
           <div className="panel">
             <h3>Time Allocation</h3><div className="sub-t">Last 7 days by discipline</div>
             <Donut data={d} />
@@ -155,6 +185,7 @@ export default function Analytics() {
             <h3>Focus trend</h3><div className="sub-t">Hours tracked per week · last 12 weeks</div>
             <Trend data={d.trend} />
           </div>
+
           <div className="panel">
             <h3>Estimate accuracy</h3>
             <div className="sub-t">Completed tasks with an estimate · last 90 days</div>

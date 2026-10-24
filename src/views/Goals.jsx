@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { ArrowUpRight, Calendar, Plus, Trash2, X } from 'lucide-react';
+import { ArrowUpRight, Calendar, Plus, Sparkles, Trash2, X } from 'lucide-react';
+import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { GOAL_STATUSES, PRIORITIES, hm, tagStyle } from '../lib.js';
 import { Modal, PriorityIcon, Select, Topbar } from '../components/ui.jsx';
@@ -59,12 +60,15 @@ export function Goals() {
 }
 
 export function GoalModal() {
-  const { goals, openGoalId, setOpenGoalId, updateGoal, deleteGoal, promoteGoal } = useStore();
+  const { goals, openGoalId, setOpenGoalId, updateGoal, deleteGoal, promoteGoal, createTask, createGoal, notify } = useStore();
   const g = goals.find((x) => x._id === openGoalId);
   const [title, setTitle] = useState(g?.title || '');
   const [desc, setDesc] = useState(g?.description || '');
   const [ms, setMs] = useState('');
   const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [coach, setCoach] = useState(null);
+
   if (!g) return null;
   const close = () => setOpenGoalId(null);
   const canPromote = !['achieved', 'archived'].includes(g.status);
@@ -72,11 +76,52 @@ export function GoalModal() {
   const done = g.milestones.filter((m) => m.done).length;
   const blurSave = (key, val) => val !== g[key] && updateGoal(g._id, { [key]: val });
 
+  const aiBreakdown = async () => {
+    setBusy('ms');
+    try {
+      const r = await api.ai.breakdown({ kind: 'goal', title: g.title, description: g.description, existing: g.milestones.map((m) => m.title) });
+      if (r.items?.length) setMilestones([...g.milestones, ...r.items.map((t) => ({ title: t, done: false }))]);
+    } catch (e) { notify(e.message); } finally { setBusy(''); }
+  };
+
+  const aiCoach = async () => {
+    setBusy('coach');
+    try {
+      setCoach(await api.ai.coachGoal(g._id));
+    } catch (e) { notify(e.message); } finally { setBusy(''); }
+  };
+
+  const promoteFirstTask = async () => {
+    if (!coach?.firstTask) return;
+    const ft = coach.firstTask;
+    const t = await createTask({
+      title: ft.title, category: g.category, discipline: g.discipline,
+      priority: ft.priority || g.priority, estimateMinutes: ft.estimateMinutes || 60,
+      status: 'up_next', subtasks: (ft.subtasks || []).map((s) => ({ title: s, done: false })),
+    });
+    if (t) {
+      await updateGoal(g._id, { status: 'in_motion' });
+      notify(`Created first step task: ${t.key}`);
+      close();
+    }
+  };
+
+  const applySplit = async () => {
+    if (!coach?.splitGoals?.length) return;
+    for (const st of coach.splitGoals) {
+      await createGoal({ title: st, category: g.category, discipline: g.discipline, priority: g.priority });
+    }
+    await updateGoal(g._id, { status: 'archived' });
+    notify(`Split into ${coach.splitGoals.length} focused goals`);
+    close();
+  };
+
   return (
     <Modal onClose={close}>
       <div className="modal-head">
         <span>GOAL</span><span>/</span>
         <span className="pri-label"><PriorityIcon priority={g.priority} />{PRIORITIES.find((p) => p.id === g.priority)?.label}</span>
+        <button className="ai-btn" disabled={busy === 'coach'} onClick={aiCoach}><Sparkles size={12} />{busy === 'coach' ? 'Coaching…' : 'Goal Coach'}</button>
         <span className="sp" />
         {confirm ? (
           <>
@@ -93,8 +138,29 @@ export function GoalModal() {
             onBlur={() => (title.trim() ? blurSave('title', title.trim()) : setTitle(g.title))} />
           <textarea className="field" placeholder="Why does this matter? What does done look like?" value={desc}
             onChange={(e) => setDesc(e.target.value)} onBlur={() => blurSave('description', desc)} />
+
+          {coach && (
+            <div className="ai-box" style={{ marginTop: 14 }}>
+              <h4><Sparkles size={14} /> AI Coach Recommendation: {coach.recommendation.toUpperCase()}</h4>
+              <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>{coach.rationale}</div>
+              {coach.firstTask && (
+                <div className="ai-sec">
+                  <b>Suggested First Concrete Task ({coach.firstTask.estimateMinutes}m)</b>
+                  <div>{coach.firstTask.title}</div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn primary" onClick={promoteFirstTask}>Promote first step task</button>
+                {coach.splitGoals?.length > 0 && <button className="btn" onClick={applySplit}>Split into {coach.splitGoals.length} goals</button>}
+                {coach.recommendation === 'drop' && <button className="btn danger" onClick={() => { updateGoal(g._id, { status: 'archived' }); close(); }}>Archive goal</button>}
+              </div>
+            </div>
+          )}
+
           <div className="section-head">Milestones <span>{done}/{g.milestones.length}</span>
-            <div className="progress"><i style={{ width: `${progress(g) * 100}%` }} /></div></div>
+            <div className="progress"><i style={{ width: `${progress(g) * 100}%` }} /></div>
+            <button className="ai-btn" disabled={busy === 'ms'} onClick={aiBreakdown}><Sparkles size={12} />{busy === 'ms' ? 'Generating…' : 'Breakdown'}</button>
+          </div>
           {g.milestones.map((m, i) => (
             <div key={m._id || i} className={`sub ${m.done ? 'done' : ''}`}>
               <button className={`box ${m.done ? 'on' : ''}`} onClick={() => setMilestones(g.milestones.map((x, j) => (j === i ? { ...x, done: !x.done } : x)))}>{m.done && '✓'}</button>

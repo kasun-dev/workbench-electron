@@ -27,6 +27,8 @@ const TaskSchema = new Schema(
     repeat: { type: String, enum: REPEATS, default: 'none' },
     spawnedNext: { type: Boolean, default: false },   // recurring: next copy already created
     goal: { type: Schema.Types.ObjectId, ref: 'LongTermGoal', default: null }, // set when promoted
+    embedding: { type: [Number], default: undefined, select: false },
+    embeddingText: { type: String, default: '', select: false },
   },
   { timestamps: true }
 );

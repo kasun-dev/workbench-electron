@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Calendar, CheckSquare, Clock, ListFilter, Pause, Play, Repeat, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import { Calendar, CheckSquare, Clock, ListFilter, Pause, Play, Repeat, Search, SlidersHorizontal, Sparkles, Trash2, X } from 'lucide-react';
+import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useNow } from '../hooks.js';
 import { PRIORITIES, STATUSES, dueInfo, hm, tagStyle } from '../lib.js';
@@ -35,12 +36,14 @@ function Card({ t, tracked, running, selected, dragging, onPlay, onClick, onDrag
 }
 
 export default function Board() {
-  const { tasks, filters, setFilters, active, startTimer, stopTimer, moveTask, updateTask, deleteTask, setOpenTaskId } = useStore();
+  const { tasks, filters, setFilters, active, startTimer, stopTimer, moveTask, updateTask, deleteTask, setOpenTaskId, notify } = useStore();
   const now = useNow(!!active);
   const [dragId, setDragId] = useState(null);
-  const [over, setOver] = useState(null);           // { status, index }
+  const [over, setOver] = useState(null);
   const [selected, setSelected] = useState(() => new Set());
   const [confirmDel, setConfirmDel] = useState(false);
+  const [semIds, setSemIds] = useState(null);
+  const [semBusy, setSemBusy] = useState(false);
 
   useEffect(() => {
     const h = (e) => { if (e.key === 'Escape') { setSelected(new Set()); setConfirmDel(false); } };
@@ -48,22 +51,37 @@ export default function Board() {
     return () => window.removeEventListener('keydown', h);
   }, []);
   useEffect(() => { if (!selected.size) setConfirmDel(false); }, [selected]);
+  useEffect(() => { if (!filters.q.trim()) setSemIds(null); }, [filters.q]);
+
+  const runSemanticFilter = async () => {
+    if (!filters.q.trim()) return;
+    setSemBusy(true);
+    try {
+      const res = await api.ai.semanticSearch(filters.q.trim());
+      setSemIds(new Set(res.map((r) => r._id)));
+    } catch (e) { notify(e.message); } finally { setSemBusy(false); }
+  };
 
   const visible = useMemo(() => {
     const q = filters.q.trim().toLowerCase();
-    return tasks.filter((t) =>
-      (!q || t.title.toLowerCase().includes(q) || (t.category || '').toLowerCase().includes(q) || t.key.toLowerCase().includes(q)) &&
-      (!filters.priorities.length || filters.priorities.includes(t.priority)) &&
-      !(filters.hideCompleted && t.status === 'completed'));
-  }, [tasks, filters]);
+    return tasks.filter((t) => {
+      const textOk = semIds
+        ? semIds.has(t._id)
+        : (!q || t.title.toLowerCase().includes(q) || (t.category || '').toLowerCase().includes(q) || t.key.toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q));
+      return textOk &&
+        (!filters.priorities.length || filters.priorities.includes(t.priority)) &&
+        !(filters.hideCompleted && t.status === 'completed');
+    });
+  }, [tasks, filters, semIds]);
 
   const columns = STATUSES.filter((s) => !(filters.hideCompleted && s.id === 'completed'));
   const trackedOf = (t) => t.totalTrackedSeconds + (active?.taskId === t._id ? Math.max(0, (now - Date.parse(active.startTime)) / 1000) : 0);
+
   const togglePri = (id) => setFilters((f) => ({ ...f, priorities: f.priorities.includes(id) ? f.priorities.filter((p) => p !== id) : [...f.priorities, id] }));
   const toggleSel = (id) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   const onCardClick = (e, t) => {
-    if (e.ctrlKey || e.metaKey || selected.size > 0) toggleSel(t._id); // Ctrl/Cmd+click starts multi-select
+    if (e.ctrlKey || e.metaKey || selected.size > 0) toggleSel(t._id);
     else setOpenTaskId(t._id);
   };
 
@@ -87,9 +105,17 @@ export default function Board() {
 
   return (
     <>
-      <Topbar title="Kanban Board" meta={`${visible.length} issues`}>
-        <label className="search"><Search size={14} />
-          <input placeholder="Filter by title, tag, ID…" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} />
+      <Topbar title="Kanban Board" meta={`${visible.length} issues${semIds ? ' (semantic)' : ''}`}>
+        <label className="search" style={{ width: 300 }}>
+          <Search size={14} />
+          <input placeholder="Filter by title, notes, or meaning…" value={filters.q}
+            onChange={(e) => { setSemIds(null); setFilters({ ...filters, q: e.target.value }); }}
+            onKeyDown={(e) => e.key === 'Enter' && filters.q.trim() && runSemanticFilter()} />
+          {filters.q.trim() && (
+            <button type="button" className="ai-btn" style={{ height: 22, padding: '0 6px' }} disabled={semBusy} onClick={runSemanticFilter} title="Semantic search by meaning (Enter)">
+              <Sparkles size={11} />{semBusy ? '…' : semIds ? 'Semantic ✓' : 'AI'}
+            </button>
+          )}
         </label>
         <Popover icon={<ListFilter size={15} />} active={filters.priorities.length > 0}>
           <h4>PRIORITY</h4>

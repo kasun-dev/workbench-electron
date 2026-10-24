@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Download, LogOut, Upload } from 'lucide-react';
+import { Download, LogOut, Sparkles, Upload } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { Segmented, Toggle, Topbar } from '../components/ui.jsx';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const CURRENCIES = ['LKR', 'USD', 'EUR', 'GBP', 'INR', 'AUD', 'CAD', 'AED', 'SGD', 'JPY'];
+const MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite'];
 
 function useSave() {
   const [msg, setMsg] = useState(null);
@@ -24,7 +25,6 @@ const Row = ({ title, hint, children }) => (
 export default function SettingsView() {
   const { user, setUser, logout, loadAll, notify } = useStore();
   const p = user.preferences;
-
   const [profile, setProfile] = useState({ displayName: user.displayName, email: user.email });
   const [pw, setPw] = useState({ currentPassword: '', newPassword: '', confirm: '' });
   const [pomo, setPomo] = useState({
@@ -35,12 +35,39 @@ export default function SettingsView() {
   const [cur, setCur] = useState(p.currency || 'LKR');
   const [plan, setPlan] = useState((p.weeklyPlan?.length === 7 ? p.weeklyPlan : [8, 8, 8, 8, 6, 3, 0]).map(String));
   const [sys, setSys] = useState(null);
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState('gemini-2.5-flash');
+  const [testingAi, setTestingAi] = useState(false);
   const [m1, save1] = useSave(); const [m2, save2] = useSave(); const [m3, save3] = useSave();
-  const [m4, save4] = useSave(); const [m5, save5] = useSave();
+  const [m4, save4] = useSave(); const [m5, save5] = useSave(); const [mAi, saveAi] = useSave();
 
-  useEffect(() => { api.system.get().then(setSys).catch(() => {}); }, []);
+  useEffect(() => {
+    api.system.get().then((s) => { setSys(s); if (s?.geminiModel) setModel(s.geminiModel); }).catch(() => {});
+  }, []);
+
   const prefs = (patch) => api.user.updatePreferences(patch).then(setUser);
   const setSystem = (patch) => api.system.set(patch).then(setSys).catch((e) => notify(e.message));
+
+  const saveGemini = () => saveAi(async () => {
+    const patch = { geminiModel: model };
+    if (apiKey.trim()) patch.geminiApiKey = apiKey.trim();
+    const next = await api.system.set(patch);
+    setSys(next);
+    setApiKey('');
+  });
+
+  const testGemini = async () => {
+    setTestingAi(true);
+    try {
+      if (apiKey.trim()) {
+        const next = await api.system.set({ geminiApiKey: apiKey.trim(), geminiModel: model });
+        setSys(next);
+        setApiKey('');
+      }
+      const r = await api.ai.test();
+      notify(`Gemini connected (${r.model})`);
+    } catch (e) { notify(e.message); } finally { setTestingAi(false); }
+  };
 
   const backup = async () => {
     try { const r = await api.data.backup(); if (r.saved) notify(`Backup saved (${r.counts.tasks} tasks, ${r.counts.timeLogs} time logs, ${r.counts.transactions} transactions)`); }
@@ -55,6 +82,29 @@ export default function SettingsView() {
     <>
       <Topbar title="Settings" />
       <div className="view"><div className="page settings">
+        <div className="card-s">
+          <h3><Sparkles size={15} style={{ color: 'var(--purple)', marginRight: 6, verticalAlign: '-2px' }} />Gemini AI</h3>
+          <p>Encrypted locally on this device via OS keychain. Powers smart capture, voice notes, breakdowns, estimates, coaching, finance insights and semantic search.</p>
+          <div className="grid2">
+            <label className="fl">
+              <span>Gemini API Key {sys?.hasApiKey && <em className="ok">({sys.maskedApiKey} active)</em>}</span>
+              <input className="field mono" type="password" placeholder={sys?.hasApiKey ? 'Paste new key to replace…' : 'AIzaSy…'}
+                value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+            </label>
+            <label className="fl">
+              <span>Model</span>
+              <input className="field mono" list="ai-models" value={model} onChange={(e) => setModel(e.target.value)} />
+              <datalist id="ai-models">{MODELS.map((m) => <option key={m} value={m} />)}</datalist>
+            </label>
+          </div>
+          <div className="actions">
+            <button className="btn primary" onClick={saveGemini}>Save AI settings</button>
+            <button className="btn" disabled={testingAi} onClick={testGemini}>{testingAi ? 'Testing…' : 'Test connection'}</button>
+            {sys?.hasApiKey && <button className="btn danger" onClick={() => setSystem({ geminiApiKey: '' })}>Clear key</button>}
+            <Msg m={mAi} />
+          </div>
+        </div>
+
         <div className="card-s">
           <h3>Profile</h3><p>How you appear in the app.</p>
           <div className="grid2">
@@ -90,7 +140,7 @@ export default function SettingsView() {
 
         <div className="card-s">
           <h3>Focus timer</h3><p>Pomodoro mode stops the timer when a focus session ends and runs your break.</p>
-          <Row title="Pomodoro mode" hint="Focus → break cycles in the sidebar timer"><Toggle on={!!p.pomodoro.enabled} onChange={(v) => prefs({ pomodoro: { enabled: v } })} /></Row>
+          <Row title="Pomodoro mode" hint="Focus / break cycles in the sidebar timer"><Toggle on={!!p.pomodoro.enabled} onChange={(v) => prefs({ pomodoro: { enabled: v } })} /></Row>
           <Row title="Auto-start breaks"><Toggle on={p.autoStartBreaks} onChange={(v) => prefs({ autoStartBreaks: v })} /></Row>
           <div className="grid2" style={{ marginTop: 16 }}>
             {[['focusMinutes', 'Focus (min)'], ['shortBreakMinutes', 'Short break (min)'], ['longBreakMinutes', 'Long break (min)'], ['longBreakEvery', 'Long break every (sessions)']].map(([k, label]) => (
@@ -100,6 +150,7 @@ export default function SettingsView() {
             <label className="fl"><span>Idle detection (minutes, 0 = off)</span>
               <input className="field" type="number" min="0" max="240" value={idleMin} onChange={(e) => setIdleMin(e.target.value)} /></label>
           </div>
+
           <h3 style={{ marginTop: 22 }}>Weekly plan</h3><p>Planned hours per day. Drives the Planned bars, Accuracy and your Today capacity.</p>
           <div className="grid7">
             {DAYS.map((d, i) => (
@@ -153,7 +204,7 @@ export default function SettingsView() {
           <h3>Keyboard shortcuts</h3>
           <div className="kbd-list">
             <span><kbd>Ctrl K</kbd> Command palette</span><span><kbd>Ctrl N</kbd> Quick capture</span>
-            <span><kbd>Ctrl 1–7</kbd> Switch view</span><span><kbd>Ctrl</kbd>+click Multi-select cards</span>
+            <span><kbd>Ctrl 1-7</kbd> Switch view</span><span><kbd>Ctrl</kbd>+click Multi-select cards</span>
             <span><kbd>Esc</kbd> Close / clear selection</span><span><kbd>Ctrl Shift T</kbd> Start/stop timer (global)</span>
           </div>
         </div>

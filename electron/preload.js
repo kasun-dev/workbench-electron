@@ -73,6 +73,23 @@ contextBridge.exposeInMainWorld('api', {
     set: (patch) => call('system:set', patch),
     toggleMini: () => call('system:toggleMini'),
   },
+  ai: {
+    test: () => call('ai:test'),
+    parseCapture: (text) => call('ai:parseCapture', { text }),
+    categorize: (title) => call('ai:categorize', { title }),
+    breakdown: (p) => call('ai:breakdown', p),
+    estimate: (p) => call('ai:estimate', p),
+    voiceCapture: (p) => call('ai:voiceCapture', p),
+    planDay: (p) => call('ai:planDay', p),
+    weeklyNarrative: (reviewData) => call('ai:weeklyNarrative', { reviewData }),
+    coachGoal: (goalId) => call('ai:coachGoal', { goalId }),
+    unblock: (taskId) => call('ai:unblock', { taskId }),
+    parseFinance: (text) => call('ai:parseFinance', { text }),
+    financeInsights: (p) => call('ai:financeInsights', p),
+    askData: (question) => call('ai:askData', { question }),
+    semanticSearch: (query) => call('ai:semanticSearch', { query }),
+    summarizeTimesheet: (p) => call('ai:summarizeTimesheet', p),
+  },
   events: {
     on: (channel, cb) => {
       if (!EVENTS.includes(channel)) throw new Error('Unknown event');

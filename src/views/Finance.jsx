@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, Copy, Download, Pencil, Plus, Repeat, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, Download, Pencil, Plus, Repeat, Sparkles, Trash2 } from 'lucide-react';
 import { api } from '../api.js';
 import { useStore } from '../store.jsx';
 import { Modal, Segmented, Topbar } from '../components/ui.jsx';
@@ -68,13 +68,17 @@ export default function Finance() {
   const [data, setData] = useState(null);
   const [year, setYear] = useState(null);
   const [filter, setFilter] = useState('all');
-  const [form, setForm] = useState(null);       // null | {} (new) | tx (edit)
+  const [form, setForm] = useState(null);
   const [delId, setDelId] = useState(null);
+  const [nlText, setNlText] = useState('');
+  const [nlBusy, setNlBusy] = useState(false);
+  const [insights, setInsights] = useState(null);
+  const [insBusy, setInsBusy] = useState(false);
   const m = (n) => money(n, cur);
 
   const load = useCallback(async () => {
     const [d, y] = await Promise.all([api.finance.month(month), api.finance.overview(Number(month.slice(0, 4)))]);
-    setData(d); setYear(y);
+    setData(d); setYear(y); setInsights(null);
   }, [month]);
   useEffect(() => { load().catch((e) => notify(e.message)); }, [load]); // eslint-disable-line
 
@@ -90,6 +94,26 @@ export default function Finance() {
   const maxExp = Math.max(0.01, ...data.expenseByCategory.map((c) => c.amount));
   const maxBar = Math.max(1, ...year.months.flatMap((x) => [x.income, x.expense, x.saving]));
   const savedRate = t.income > 0 ? Math.round((t.saving / t.income) * 100) : 0;
+
+  const submitPlainEnglish = async (e) => {
+    e.preventDefault();
+    if (!nlText.trim()) return;
+    setNlBusy(true);
+    try {
+      const parsed = await api.ai.parseFinance(nlText.trim());
+      await api.finance.create(parsed);
+      setNlText('');
+      const targetMonth = parsed.date.slice(0, 7);
+      notify(`Added ${parsed.type}: ${m(parsed.amount)} (${parsed.category})`);
+      if (targetMonth !== month) setMonth(targetMonth); else load();
+    } catch (ex) { notify(ex.message); } finally { setNlBusy(false); }
+  };
+
+  const loadInsights = async () => {
+    setInsBusy(true);
+    try { setInsights(await api.ai.financeInsights({ currency: cur, monthData: data, yearData: year })); }
+    catch (ex) { notify(ex.message); } finally { setInsBusy(false); }
+  };
 
   const remove = async (id) => {
     try { await api.finance.delete(id); setDelId(null); load(); } catch (e) { notify(e.message); }
@@ -114,13 +138,39 @@ export default function Finance() {
           <button className="icon-btn" onClick={() => setMonth(shiftMonth(month, 1))}><ChevronRight size={15} /></button>
           {month !== curMonth() && <button className="btn" onClick={() => setMonth(curMonth())}>This month</button>}
         </div>
+        <button className="ai-btn" disabled={insBusy} onClick={loadInsights}><Sparkles size={13} />{insBusy ? 'Analyzing…' : 'AI Insights'}</button>
         <button className="btn" onClick={carry} title={`Copy recurring items from ${monthLabel(shiftMonth(month, -1))}`}><Copy size={14} />Carry over</button>
         <button className="icon-btn" onClick={exportCsv} title="Export month as CSV"><Download size={15} /></button>
         <button className="btn primary" onClick={() => setForm({})}><Plus size={14} />Add</button>
       </Topbar>
 
       <div className="view"><div className="page">
+        <form className="ai-bar" onSubmit={submitPlainEnglish}>
+          <Sparkles size={15} style={{ color: 'var(--purple)' }} />
+          <input placeholder='Plain-English entry: e.g. "Spent 4500 on fuel yesterday" or "Saved 20000 to Bike pot"'
+            value={nlText} onChange={(e) => setNlText(e.target.value)} disabled={nlBusy} />
+          <button className="ai-btn" type="submit" disabled={nlBusy || !nlText.trim()}>{nlBusy ? 'Adding…' : 'Add with AI'}</button>
+        </form>
+
+        {insights && (
+          <div className="ai-box">
+            <h4><Sparkles size={14} /> Monthly AI Finance Insights — Projected End Balance: {m(insights.forecastEndBalance)}</h4>
+            <div style={{ fontSize: 12.5 }}>{insights.summary} <span className="meta">({insights.forecastNote})</span></div>
+            <div className="ai-grid">
+              <div className="ai-sec">
+                <b>Unusual Spending &amp; Callouts</b>
+                {insights.anomalies?.length ? insights.anomalies.map((a, i) => <div key={i}>• {a}</div>) : 'No unusual spikes detected.'}
+              </div>
+              <div className="ai-sec">
+                <b>Recurring Charges Detected</b>
+                {insights.recurringDetected?.length ? insights.recurringDetected.map((r, i) => <div key={i}>• {r}</div>) : 'No unflagged recurring charges detected.'}
+              </div>
+            </div>
+          </div>
+        )}
+
         <h2 className="fin-month">{monthLabel(month)}</h2>
+
         <div className="stats">
           <div className="stat"><div className="k">INCOME</div><div className="v pos">{m(t.income)}</div></div>
           <div className="stat"><div className="k">EXPENSES</div><div className="v neg">{m(t.expense)}</div></div>
@@ -158,7 +208,7 @@ export default function Finance() {
                   <span className={`tx-amt mono ${x.type}`}>{x.type === 'income' ? '+' : x.type === 'expense' ? '−' : ''}{m(x.amount)}</span>
                   {delId === x._id ? (
                     <span className="tx-acts"><button className="btn danger" style={{ height: 24, padding: '0 8px' }} onClick={() => remove(x._id)}>Delete</button>
-                      <button className="tb sm" onClick={() => setDelId(null)}>✕</button></span>
+                      <button className="tb sm" onClick={() => setDelId(null)}>×</button></span>
                   ) : (
                     <span className="tx-acts">
                       <button className="tb sm" title="Edit" onClick={() => setForm(x)}><Pencil size={12} /></button>
@@ -183,6 +233,7 @@ export default function Finance() {
                 ))}
               </div>
             </div>
+
             <div className="panel">
               <h3>Income sources</h3>
               <div style={{ marginTop: 12 }}>
@@ -190,6 +241,7 @@ export default function Finance() {
                 {data.incomeByCategory.map((c) => <div className="lg2" key={c.name}><span>{c.name}</span><span className="mono pos">{m(c.amount)}</span></div>)}
               </div>
             </div>
+
             <div className="panel">
               <h3>Savings pots</h3><div className="sub-t">All time</div>
               <div style={{ marginTop: 12 }}>

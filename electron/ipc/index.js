@@ -8,6 +8,7 @@ const { registerReviewHandlers } = require('./review');
 const { registerFinanceHandlers } = require('./finance');
 const { registerDataHandlers } = require('./data');
 const { registerSystemHandlers } = require('./system');
+const { registerAiHandlers } = require('./ai');
 
 module.exports = function registerIpc() {
   registerAuthHandlers();
@@ -20,4 +21,5 @@ module.exports = function registerIpc() {
   registerFinanceHandlers();
   registerDataHandlers();
   registerSystemHandlers();
+  registerAiHandlers();
 };

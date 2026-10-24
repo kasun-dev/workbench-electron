@@ -7,6 +7,7 @@ const state = require('../state');
 const { handle, AppError, dateStr } = require('./helpers');
 const { stopRunning } = require('./timer');
 const { broadcast } = require('../events');
+const { summarizeTimeLogsForUser } = require('./ai');
 
 const pad = (n) => String(n).padStart(2, '0');
 const d10 = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -20,7 +21,6 @@ const cell = (v) => {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 const csv = (rows) => `\ufeff${rows.map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`;
-
 const parent = (event) => BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
 
 async function saveFile(event, defaultPath, content, name, ext) {
@@ -38,17 +38,25 @@ function registerDataHandlers() {
     const end = new Date(`${to}T00:00:00`); end.setDate(end.getDate() + 1);
     const logs = await TimeLog.find({ user: userId, isRunning: false, startTime: { $gte: start, $lt: end } }).sort('startTime').lean();
     if (!logs.length) throw new AppError('No tracked time in that date range');
-    const tasks = await Task.find({ _id: { $in: [...new Set(logs.map((l) => String(l.task)))] } }).select('key title category discipline').lean();
+    const tasks = await Task.find({ _id: { $in: [...new Set(logs.map((l) => String(l.task)))] } }).select('key title category discipline subtasks').lean();
     const tm = new Map(tasks.map((t) => [String(t._id), t]));
-    const rows = [['Date', 'Start', 'End', 'Duration', 'Hours', 'Task', 'Title', 'Category', 'Discipline']];
+    const aiLines = payload.aiSummary ? await summarizeTimeLogsForUser(userId, logs, tm) : null;
+    const head = ['Date', 'Start', 'End', 'Duration', 'Hours', 'Task', 'Title', 'Category', 'Discipline'];
+    if (aiLines) head.push('Client Summary');
+    const rows = [head];
     let total = 0;
-    for (const l of logs) {
+    for (let i = 0; i < logs.length; i++) {
+      const l = logs[i];
       const t = tm.get(String(l.task)) || {};
       total += l.durationSeconds;
-      rows.push([d10(l.startTime), t8(l.startTime), t8(l.endTime), hms(l.durationSeconds), (l.durationSeconds / 3600).toFixed(2),
-        t.key, t.title, t.category, t.discipline]);
+      const row = [d10(l.startTime), t8(l.startTime), t8(l.endTime), hms(l.durationSeconds), (l.durationSeconds / 3600).toFixed(2),
+        t.key, t.title, t.category, t.discipline];
+      if (aiLines) row.push(aiLines[i] || '');
+      rows.push(row);
     }
-    rows.push(['', '', 'TOTAL', hms(total), (total / 3600).toFixed(2), '', '', '', '']);
+    const totRow = ['', '', 'TOTAL', hms(total), (total / 3600).toFixed(2), '', '', '', ''];
+    if (aiLines) totRow.push('');
+    rows.push(totRow);
     const res = await saveFile(event, `workbench-timesheet-${from}_${to}.csv`, csv(rows), 'CSV', 'csv');
     return { ...res, count: logs.length, hours: Math.round((total / 3600) * 10) / 10 };
   });
@@ -84,10 +92,10 @@ function registerDataHandlers() {
     if (pick.canceled || !pick.filePaths[0]) return { restored: false };
     const stat = await fs.promises.stat(pick.filePaths[0]);
     if (stat.size > 50 * 1024 * 1024) throw new AppError('That file is too large to be a Workbench backup');
-
     let data;
     try { data = JSON.parse(await fs.promises.readFile(pick.filePaths[0], 'utf8')); } catch { throw new AppError('Could not read that file'); }
     if (!data || data.app !== 'workbench' || data.version !== 1) throw new AppError('This is not a Workbench backup file');
+
     const arr = (v) => (Array.isArray(v) ? v : []);
     const [bt, bl, bg, bx] = [arr(data.tasks), arr(data.timeLogs), arr(data.goals), arr(data.transactions)];
 
@@ -98,7 +106,6 @@ function registerDataHandlers() {
     });
     if (confirm.response !== 0) return { restored: false };
 
-    // Build + validate everything BEFORE deleting anything, with fresh ids
     const ids = new Map();
     const nid = (old) => { const k = String(old); if (!ids.has(k)) ids.set(k, new mongoose.Types.ObjectId()); return ids.get(k); };
     const taskIds = new Set(bt.map((t) => String(t._id)));
